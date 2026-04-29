@@ -158,6 +158,19 @@ CREATE TABLE `guid_sql_tb` (
 -- server 会自动创建 admin@local.invalid / 随机密码 的管理员账号，
 -- 并将明文随机密码打印到 server 控制台日志中，便于通过 docker logs 查看。
 
+-- OIDC 配置表
+CREATE TABLE `oidc_config_tb` (
+  `code`           INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `client_id`      VARCHAR(256) NOT NULL COMMENT 'OIDC Client ID',
+  `client_secret`  VARCHAR(512) NOT NULL COMMENT 'OIDC Client Secret',
+  `issuer`         VARCHAR(512) NOT NULL COMMENT 'OIDC Issuer URL',
+  `callback_url`   VARCHAR(512) NOT NULL COMMENT 'OIDC 回调地址',
+  `enabled`        TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '是否启用',
+  `created_time`   DATETIME     NOT NULL COMMENT '创建时间',
+  `updated_time`   DATETIME     NOT NULL COMMENT '更新时间',
+  PRIMARY KEY (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 COMMIT;
 
 -- WebAuth

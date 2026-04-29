@@ -36,6 +36,7 @@ import {
   ReloadOutlined,
   SafetyCertificateOutlined,
   SendOutlined,
+  SettingOutlined,
   SyncOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -91,6 +92,20 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
   const [createStreamEndpoint, setCreateStreamEndpoint] = useState('');
   const [createStreamEvents, setCreateStreamEvents] = useState<string[]>([]);
   const [creating, setCreating] = useState(false);
+
+  // Config state
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configTesting, setConfigTesting] = useState(false);
+  const [configData, setConfigData] = useState<any>(null);
+  const [configForm, setConfigForm] = useState({
+    clientId: '',
+    clientSecret: '',
+    issuer: '',
+    callbackUrl: '',
+    enabled: true,
+  });
+  const [testResult, setTestResult] = useState<any>(null);
 
   const headers = {
     headers: {
@@ -154,10 +169,103 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
   }, [token]);
 
   useEffect(() => {
+    void loadOidcConfig();
     void loadOidcStatus();
     void loadSsfStream();
     void loadEventLog();
   }, []);
+
+  // ── Config Management ────────────────────────────────
+
+  const loadOidcConfig = async () => {
+    setConfigLoading(true);
+    try {
+      const client = createClient();
+      const res = await client.get('/api/oidc/config', headers);
+      if (res.jsonData.status && res.jsonData.data) {
+        const d = res.jsonData.data;
+        setConfigData(d);
+        setConfigForm({
+          clientId: d.clientId || '',
+          clientSecret: d.clientSecret || '',
+          issuer: d.issuer || '',
+          callbackUrl: d.callbackUrl || '',
+          enabled: d.enabled !== false,
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load OIDC config', err);
+    } finally {
+      setConfigLoading(false);
+    }
+  };
+
+  const handleSaveConfig = async () => {
+    if (!configForm.clientId || !configForm.issuer) {
+      message.warning('Client ID 和 Issuer URL 为必填项');
+      return;
+    }
+    setConfigSaving(true);
+    try {
+      const client = createClient();
+      const res = await client.post('/api/oidc/config', {
+        ...headers,
+        body: JSON.stringify(configForm),
+      });
+      if (res.jsonData.status) {
+        message.success(res.jsonData.message || '配置已保存');
+        await loadOidcConfig();
+      } else {
+        message.error(res.jsonData.message || '保存失败');
+      }
+    } catch (err) {
+      message.error('保存失败');
+    } finally {
+      setConfigSaving(false);
+    }
+  };
+
+  const handleDeleteConfig = async () => {
+    try {
+      const client = createClient();
+      const res = await client.delete('/api/oidc/config', headers);
+      if (res.jsonData.status) {
+        message.success(res.jsonData.message || '配置已删除');
+        await loadOidcConfig();
+      } else {
+        message.error(res.jsonData.message);
+      }
+    } catch (err) {
+      message.error('删除失败');
+    }
+  };
+
+  const handleTestConnection = async () => {
+    if (!configForm.issuer) {
+      message.warning('请先填写 Issuer URL');
+      return;
+    }
+    setConfigTesting(true);
+    setTestResult(null);
+    try {
+      const client = createClient();
+      const res = await client.post('/api/oidc/config/test', {
+        ...headers,
+        body: JSON.stringify({ issuer: configForm.issuer }),
+      });
+      setTestResult(res.jsonData);
+      if (res.jsonData.status) {
+        message.success('连接成功');
+      } else {
+        message.error(res.jsonData.message || '连接失败');
+      }
+    } catch (err) {
+      message.error('测试失败');
+      setTestResult({ status: false, message: '网络错误' });
+    } finally {
+      setConfigTesting(false);
+    }
+  };
 
   const handleConnect = async () => {
     try {
@@ -668,9 +776,197 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
     </div>
   );
 
+  // ── Tab 0: OIDC Config ─────────────────────────────────
+
+  const renderConfigTab = () => (
+    <div>
+      <Card
+        style={{
+          background: 'linear-gradient(135deg, #f0f5ff 0%, #faf5ff 100%)',
+          borderColor: '#d3adf7',
+          marginBottom: 24,
+        }}
+      >
+        <Row align="middle" gutter={16}>
+          <Col>
+            <SettingOutlined style={{ fontSize: 48, color: '#722ed1' }} />
+          </Col>
+          <Col flex="auto">
+            <Title level={4} style={{ margin: 0 }}>
+              OIDC Provider 配置
+            </Title>
+            <Text type="secondary">
+              配置来源：
+              <Tag
+                color={configData?.configSource === 'database' ? 'purple' : 'default'}
+                style={{ marginLeft: 8 }}
+              >
+                {configData?.configSource === 'database' ? '数据库' : 'application.yml'}
+              </Tag>
+            </Text>
+          </Col>
+        </Row>
+      </Card>
+
+      <Spin spinning={configLoading}>
+        <Card title="OIDC 客户端配置" size="small" style={{ marginBottom: 16 }}>
+          <Form layout="vertical">
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item label="Client ID" required>
+                  <Input
+                    placeholder="oidc-xxxxxxxx"
+                    value={configForm.clientId}
+                    onChange={(e) => setConfigForm({ ...configForm, clientId: e.target.value })}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="Client Secret" required>
+                  <Input.Password
+                    placeholder="输入 Client Secret"
+                    value={configForm.clientSecret}
+                    onChange={(e) => setConfigForm({ ...configForm, clientSecret: e.target.value })}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item label="Issuer URL" required>
+                  <Input
+                    placeholder="https://idp.example.com"
+                    value={configForm.issuer}
+                    onChange={(e) => setConfigForm({ ...configForm, issuer: e.target.value })}
+                    addonAfter={
+                      <Button
+                        type="link"
+                        size="small"
+                        loading={configTesting}
+                        onClick={handleTestConnection}
+                        style={{ padding: 0, height: 'auto' }}
+                      >
+                        测试连通性
+                      </Button>
+                    }
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="Callback URL">
+                  <Input
+                    placeholder="https://your-app.com/api/oidc/callback"
+                    value={configForm.callbackUrl}
+                    onChange={(e) => setConfigForm({ ...configForm, callbackUrl: e.target.value })}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item label="启用状态">
+                  <Checkbox
+                    checked={configForm.enabled}
+                    onChange={(e) => setConfigForm({ ...configForm, enabled: e.target.checked })}
+                  >
+                    启用此 OIDC 配置
+                  </Checkbox>
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item>
+              <Space>
+                <Button
+                  type="primary"
+                  loading={configSaving}
+                  onClick={handleSaveConfig}
+                  style={{
+                    background: 'linear-gradient(135deg, #722ed1, #1890ff)',
+                    border: 'none',
+                    borderRadius: 8,
+                    fontWeight: 600,
+                  }}
+                >
+                  保存配置
+                </Button>
+                {configData?.configSource === 'database' && (
+                  <Popconfirm
+                    title="确认删除数据库中的 OIDC 配置？删除后将回退到 yml 配置。"
+                    onConfirm={handleDeleteConfig}
+                    okText="确认"
+                    cancelText="取消"
+                  >
+                    <Button danger icon={<DeleteOutlined />}>
+                      删除配置
+                    </Button>
+                  </Popconfirm>
+                )}
+              </Space>
+            </Form.Item>
+          </Form>
+        </Card>
+
+        {testResult && (
+          <Card
+            title="连通性测试结果"
+            size="small"
+            style={{ marginBottom: 16 }}
+          >
+            {testResult.status ? (
+              <>
+                <Alert
+                  message="连接成功"
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                />
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="Issuer">
+                    {testResult.data?.issuer || '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Authorization Endpoint">
+                    <Text copyable style={{ fontSize: 12 }}>
+                      {testResult.data?.authorization_endpoint || '-'}
+                    </Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Token Endpoint">
+                    <Text copyable style={{ fontSize: 12 }}>
+                      {testResult.data?.token_endpoint || '-'}
+                    </Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="UserInfo Endpoint">
+                    <Text copyable style={{ fontSize: 12 }}>
+                      {testResult.data?.userinfo_endpoint || '-'}
+                    </Text>
+                  </Descriptions.Item>
+                </Descriptions>
+              </>
+            ) : (
+              <Alert
+                message="连接失败"
+                description={testResult.message}
+                type="error"
+                showIcon
+              />
+            )}
+          </Card>
+        )}
+      </Spin>
+    </div>
+  );
+
   // ── Main ──────────────────────────────────────────────
 
   const tabItems = [
+    {
+      key: 'config',
+      label: (
+        <span>
+          <SettingOutlined /> OIDC 配置
+        </span>
+      ),
+      children: renderConfigTab(),
+    },
     {
       key: 'oidc',
       label: (

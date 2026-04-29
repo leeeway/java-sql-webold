@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.guohai.javasqlweb.beans.*;
 import org.guohai.javasqlweb.config.OidcSsfConfig;
+import org.guohai.javasqlweb.dao.OidcConfigDao;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -34,6 +35,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     private static final Logger LOG = LoggerFactory.getLogger(OidcSsfServiceImpl.class);
 
     private final OidcSsfConfig config;
+    private final OidcConfigDao oidcConfigDao;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
 
@@ -54,12 +56,38 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     private final CopyOnWriteArrayList<SsfEvent> eventLog = new CopyOnWriteArrayList<>();
     private static final int MAX_EVENT_LOG = 500;
 
-    public OidcSsfServiceImpl(OidcSsfConfig config, ObjectMapper objectMapper) {
+    public OidcSsfServiceImpl(OidcSsfConfig config, OidcConfigDao oidcConfigDao, ObjectMapper objectMapper) {
         this.config = config;
+        this.oidcConfigDao = oidcConfigDao;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
+    }
+
+    /**
+     * 获取生效的 OIDC 配置：优先数据库，fallback 到 yml。
+     */
+    private OidcConfigBean getEffectiveConfig() {
+        try {
+            OidcConfigBean dbConfig = oidcConfigDao.getOidcConfig();
+            if (dbConfig != null && Boolean.TRUE.equals(dbConfig.getEnabled())) {
+                dbConfig.setConfigSource("database");
+                return dbConfig;
+            }
+        } catch (Exception e) {
+            LOG.warn("Failed to load OIDC config from DB, falling back to yml", e);
+        }
+        // fallback 到 application.yml
+        OidcConfigBean fallback = OidcConfigBean.builder()
+                .clientId(config.getClientId())
+                .clientSecret(config.getClientSecret())
+                .issuer(config.getIssuer())
+                .callbackUrl(config.getCallbackUrl())
+                .enabled(true)
+                .configSource("yml")
+                .build();
+        return fallback;
     }
 
     // ════════════════════════════════════════════════════════
@@ -75,7 +103,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
                 return oidcDiscovery;
             }
             try {
-                String url = config.getIssuer() + "/.well-known/openid-configuration";
+                String url = getEffectiveConfig().getIssuer() + "/.well-known/openid-configuration";
                 oidcDiscovery = httpGetJson(url);
                 LOG.info("OIDC discovery loaded from {}", url);
             } catch (Exception e) {
@@ -95,7 +123,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
                 return ssfDiscovery;
             }
             try {
-                String url = config.getIssuer() + "/.well-known/ssf-configuration";
+                String url = getEffectiveConfig().getIssuer() + "/.well-known/ssf-configuration";
                 ssfDiscovery = httpGetJson(url);
                 LOG.info("SSF discovery loaded from {}", url);
             } catch (Exception e) {
@@ -128,13 +156,14 @@ public class OidcSsfServiceImpl implements OidcSsfService {
 
         pkceStore.put(state, codeVerifier);
 
+        OidcConfigBean effectiveConfig = getEffectiveConfig();
         String authEndpoint = disc("authorization_endpoint");
         String scopes = "openid email profile ssf.manage ssf.read";
 
         String url = authEndpoint
                 + "?response_type=code"
-                + "&client_id=" + enc(config.getClientId())
-                + "&redirect_uri=" + enc(config.getCallbackUrl())
+                + "&client_id=" + enc(effectiveConfig.getClientId())
+                + "&redirect_uri=" + enc(effectiveConfig.getCallbackUrl())
                 + "&scope=" + enc(scopes)
                 + "&state=" + enc(state)
                 + "&code_challenge=" + enc(codeChallenge)
@@ -150,12 +179,13 @@ public class OidcSsfServiceImpl implements OidcSsfService {
             return new Result<>(false, "Invalid state parameter", null);
         }
 
+        OidcConfigBean effectiveConfig = getEffectiveConfig();
         String tokenEndpoint = disc("token_endpoint");
         String body = "grant_type=authorization_code"
                 + "&code=" + enc(code)
-                + "&redirect_uri=" + enc(config.getCallbackUrl())
-                + "&client_id=" + enc(config.getClientId())
-                + "&client_secret=" + enc(config.getClientSecret())
+                + "&redirect_uri=" + enc(effectiveConfig.getCallbackUrl())
+                + "&client_id=" + enc(effectiveConfig.getClientId())
+                + "&client_secret=" + enc(effectiveConfig.getClientSecret())
                 + "&code_verifier=" + enc(codeVerifier);
 
         try {
@@ -183,11 +213,12 @@ public class OidcSsfServiceImpl implements OidcSsfService {
             return new Result<>(false, "No refresh token available", null);
         }
 
+        OidcConfigBean effectiveConfig = getEffectiveConfig();
         String tokenEndpoint = disc("token_endpoint");
         String body = "grant_type=refresh_token"
                 + "&refresh_token=" + enc(storedTokens.getRefreshToken())
-                + "&client_id=" + enc(config.getClientId())
-                + "&client_secret=" + enc(config.getClientSecret());
+                + "&client_id=" + enc(effectiveConfig.getClientId())
+                + "&client_secret=" + enc(effectiveConfig.getClientSecret());
 
         try {
             Map<String, Object> tokenResponse = httpPostForm(tokenEndpoint, body);
@@ -397,6 +428,96 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     @Override
     public List<SsfEvent> getEventLog() {
         return List.copyOf(eventLog);
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  OIDC Config Management
+    // ════════════════════════════════════════════════════════
+
+    @Override
+    public Result<OidcConfigBean> getOidcConfig() {
+        OidcConfigBean effective = getEffectiveConfig();
+        // 脱敏 secret
+        if (effective.getClientSecret() != null && effective.getClientSecret().length() > 8) {
+            effective.setClientSecret(
+                    effective.getClientSecret().substring(0, 4) + "****"
+                            + effective.getClientSecret().substring(effective.getClientSecret().length() - 4));
+        }
+        return new Result<>(true, "OK", effective);
+    }
+
+    @Override
+    public Result<OidcConfigBean> saveOidcConfig(OidcConfigBean incoming) {
+        try {
+            OidcConfigBean existing = oidcConfigDao.getOidcConfig();
+            if (existing != null) {
+                // 如果前端传的是脱敏 secret（含 ****），保留原值
+                if (incoming.getClientSecret() != null && incoming.getClientSecret().contains("****")) {
+                    incoming.setClientSecret(existing.getClientSecret());
+                }
+                incoming.setCode(existing.getCode());
+                oidcConfigDao.updateOidcConfig(incoming);
+            } else {
+                if (incoming.getEnabled() == null) {
+                    incoming.setEnabled(true);
+                }
+                oidcConfigDao.insertOidcConfig(incoming);
+            }
+            // 清除 discovery 缓存以重新加载
+            clearDiscoveryCache();
+
+            OidcConfigBean saved = oidcConfigDao.getOidcConfig();
+            saved.setConfigSource("database");
+            // 脱敏返回
+            if (saved.getClientSecret() != null && saved.getClientSecret().length() > 8) {
+                saved.setClientSecret(
+                        saved.getClientSecret().substring(0, 4) + "****"
+                                + saved.getClientSecret().substring(saved.getClientSecret().length() - 4));
+            }
+            return new Result<>(true, "配置已保存", saved);
+        } catch (Exception e) {
+            LOG.error("Failed to save OIDC config", e);
+            return new Result<>(false, "保存失败: " + e.getMessage(), null);
+        }
+    }
+
+    @Override
+    public Result<String> deleteOidcConfig() {
+        try {
+            oidcConfigDao.deleteAllOidcConfig();
+            clearDiscoveryCache();
+            return new Result<>(true, "配置已删除，将回退到 yml 配置", null);
+        } catch (Exception e) {
+            LOG.error("Failed to delete OIDC config", e);
+            return new Result<>(false, "删除失败: " + e.getMessage(), null);
+        }
+    }
+
+    @Override
+    public Result<Map<String, Object>> testOidcConnection(String issuer) {
+        if (issuer == null || issuer.isBlank()) {
+            return new Result<>(false, "Issuer URL 不能为空", null);
+        }
+        String url = issuer.replaceAll("/+$", "") + "/.well-known/openid-configuration";
+        try {
+            Map<String, Object> discovery = httpGetJson(url);
+            if (discovery.containsKey("authorization_endpoint")) {
+                Map<String, Object> summary = new LinkedHashMap<>();
+                summary.put("issuer", discovery.get("issuer"));
+                summary.put("authorization_endpoint", discovery.get("authorization_endpoint"));
+                summary.put("token_endpoint", discovery.get("token_endpoint"));
+                summary.put("userinfo_endpoint", discovery.get("userinfo_endpoint"));
+                return new Result<>(true, "连接成功", summary);
+            }
+            return new Result<>(false, "返回的 discovery 文档缺少 authorization_endpoint", null);
+        } catch (Exception e) {
+            return new Result<>(false, "连接失败: " + e.getMessage(), null);
+        }
+    }
+
+    private void clearDiscoveryCache() {
+        this.oidcDiscovery = null;
+        this.ssfDiscovery = null;
     }
 
     // ════════════════════════════════════════════════════════

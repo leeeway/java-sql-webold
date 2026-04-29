@@ -98,4 +98,32 @@ public interface OidcSsfService {
      * @return 事件列表
      */
     List<SsfEvent> getEventLog();
+
+    // ── OIDC Config ─────────────────────────────────────
+
+    /**
+     * 获取当前 OIDC 配置（secret 脱敏）
+     * @return 配置信息
+     */
+    Result<OidcConfigBean> getOidcConfig();
+
+    /**
+     * 保存 OIDC 配置（新增或更新）
+     * @param config 配置
+     * @return 保存后的配置
+     */
+    Result<OidcConfigBean> saveOidcConfig(OidcConfigBean config);
+
+    /**
+     * 删除 OIDC 配置
+     * @return 结果
+     */
+    Result<String> deleteOidcConfig();
+
+    /**
+     * 测试 OIDC Provider 连通性
+     * @param issuer Issuer URL
+     * @return 测试结果
+     */
+    Result<Map<String, Object>> testOidcConnection(String issuer);
 }

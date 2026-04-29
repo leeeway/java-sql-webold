@@ -181,4 +181,47 @@ public class OidcSsfController {
     public Result<List<SsfEvent>> getEventLog() {
         return new Result<>(true, "OK", oidcSsfService.getEventLog());
     }
+
+    // ── OIDC Config ─────────────────────────────────────
+
+    /**
+     * 获取 OIDC 配置（secret 脱敏）
+     */
+    @AdminPageRequired
+    @GetMapping("/api/oidc/config")
+    @ResponseBody
+    public Result<OidcConfigBean> getOidcConfig() {
+        return oidcSsfService.getOidcConfig();
+    }
+
+    /**
+     * 保存 OIDC 配置
+     */
+    @AdminPageRequired
+    @PostMapping("/api/oidc/config")
+    @ResponseBody
+    public Result<OidcConfigBean> saveOidcConfig(@RequestBody OidcConfigBean config) {
+        return oidcSsfService.saveOidcConfig(config);
+    }
+
+    /**
+     * 删除 OIDC 配置
+     */
+    @AdminPageRequired
+    @DeleteMapping("/api/oidc/config")
+    @ResponseBody
+    public Result<String> deleteOidcConfig() {
+        return oidcSsfService.deleteOidcConfig();
+    }
+
+    /**
+     * 测试 OIDC Provider 连通性
+     */
+    @AdminPageRequired
+    @PostMapping("/api/oidc/config/test")
+    @ResponseBody
+    public Result<Map<String, Object>> testOidcConnection(@RequestBody Map<String, String> body) {
+        String issuer = body.get("issuer");
+        return oidcSsfService.testOidcConnection(issuer);
+    }
 }
