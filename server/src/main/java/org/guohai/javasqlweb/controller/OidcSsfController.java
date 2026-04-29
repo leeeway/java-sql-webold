@@ -224,4 +224,52 @@ public class OidcSsfController {
         String issuer = body.get("issuer");
         return oidcSsfService.testOidcConnection(issuer);
     }
+
+    // ── OIDC Login ──────────────────────────────────────
+
+    /**
+     * 查询 OIDC 登录是否可用（公开端点）
+     */
+    @GetMapping("/api/oidc/login-enabled")
+    @ResponseBody
+    public Result<Map<String, Object>> isOidcLoginEnabled() {
+        boolean enabled = oidcSsfService.isOidcLoginEnabled();
+        return new Result<>(true, "OK", Map.of("enabled", enabled));
+    }
+
+    /**
+     * 获取 OIDC 登录授权 URL（公开端点）
+     */
+    @GetMapping("/api/oidc/login-url")
+    @ResponseBody
+    public Result<Map<String, String>> getLoginUrl() {
+        if (!oidcSsfService.isOidcLoginEnabled()) {
+            return new Result<>(false, "OIDC login is not enabled", null);
+        }
+        Map<String, String> data = oidcSsfService.buildLoginAuthorizationUrl();
+        return new Result<>(true, "OK", data);
+    }
+
+    /**
+     * OIDC 登录回调（公开端点）
+     * 认证成功后重定向到前端并附带 token
+     */
+    @GetMapping("/api/oidc/login/callback")
+    public void loginCallback(@RequestParam("code") String code,
+                              @RequestParam("state") String state,
+                              HttpServletResponse response) throws IOException {
+        Result<UserBean> result = oidcSsfService.handleLoginCallback(code, state);
+        if (result.getStatus() && result.getData() != null) {
+            // 登录成功，重定向到前端并携带 token
+            String token = result.getData().getToken();
+            response.sendRedirect("/?oidc_token=" + token);
+        } else {
+            response.setContentType("text/html;charset=UTF-8");
+            response.getWriter().write(
+                    "<html><body><h2>OIDC 登录失败</h2>"
+                            + "<p>" + result.getMessage() + "</p>"
+                            + "<a href=\"/login\">返回登录页</a></body></html>"
+            );
+        }
+    }
 }

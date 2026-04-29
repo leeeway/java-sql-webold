@@ -247,4 +247,41 @@ public interface UserManageDao {
     @Update("UPDATE user_tb SET access_token_expire_time=#{expireTime} WHERE code=#{userCode}")
     Boolean renewAccessToken(@Param("userCode") Integer userCode,
                              @Param("expireTime") Date expireTime);
+
+    // ── OIDC ────────────────────────────────────────────
+
+    /**
+     * 按 OIDC sub 查找用户
+     * @param sub OIDC Subject
+     * @return 用户
+     */
+    @Select("SELECT code,user_name,email,create_time,auth_status,account_status,oidc_sub,access_token_hash,access_token_expire_time " +
+            "FROM user_tb WHERE oidc_sub=#{sub}")
+    UserBean getUserByOidcSub(@Param("sub") String sub);
+
+    /**
+     * 为已有用户绑定 OIDC sub
+     * @param userCode 用户编号
+     * @param sub OIDC Subject
+     * @return 是否成功
+     */
+    @Update("UPDATE user_tb SET oidc_sub=#{sub} WHERE code=#{userCode}")
+    Boolean updateOidcSub(@Param("userCode") Integer userCode, @Param("sub") String sub);
+
+    /**
+     * 创建 OIDC 来源用户（免 OTP）
+     * @param userName 用户名
+     * @param email 邮箱
+     * @param passwordHash 随机密码哈希
+     * @param oidcSub OIDC Subject
+     * @return 是否成功
+     */
+    @Insert("INSERT INTO user_tb " +
+            "(user_name, email, create_time, pass_word, token, account_status, auth_status, login_status, oidc_sub) " +
+            "VALUES (#{name}, #{email}, NOW(), #{passwordHash}, '', 'ACTIVE', 'BIND', 'LOGOUT', #{oidcSub})")
+    @Options(useGeneratedKeys = true, keyProperty = "code", keyColumn = "code")
+    Boolean addNewOidcUser(@Param("name") String userName,
+                           @Param("email") String email,
+                           @Param("passwordHash") String passwordHash,
+                           @Param("oidcSub") String oidcSub);
 }

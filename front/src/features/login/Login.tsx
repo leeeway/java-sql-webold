@@ -2,10 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import './Login.css';
 import cookie from 'react-cookies';
-import { Alert, Button, Modal, Input, Tag } from 'antd';
+import { Alert, Button, Divider, Modal, Input, Tag } from 'antd';
 import {
   AndroidOutlined,
   AppleOutlined,
+  LoginOutlined,
   UnlockOutlined,
   UserOutlined,
 } from '@ant-design/icons';
@@ -75,6 +76,8 @@ function Login() {
   const location = useLocation();
   const navigate = useNavigate();
   const [state, setState] = useState<LoginState>(initialState);
+  const [oidcEnabled, setOidcEnabled] = useState(false);
+  const [oidcLoading, setOidcLoading] = useState(false);
   const loginLogo = '/jsw_logo.png';
   const otpInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -207,11 +210,37 @@ function Login() {
     const searchParams = new URLSearchParams(location.search);
     const userName = searchParams.get('username');
 
+    // 处理 OIDC 登录回调 token
+    const oidcToken = searchParams.get('oidc_token');
+    if (oidcToken) {
+      cookie.save('token', oidcToken, { path: '/' });
+      // 清除 URL 参数
+      window.history.replaceState({}, '', '/');
+      navigate('/');
+      return;
+    }
+
     if (userName) {
       updateState({
         userName,
       });
     }
+
+    // 检查 OIDC 登录是否可用
+    const checkOidc = async () => {
+      try {
+        const client = createClient();
+        const res = await client.get('/api/oidc/login-enabled', {
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (res.jsonData?.status && res.jsonData?.data?.enabled) {
+          setOidcEnabled(true);
+        }
+      } catch (e) {
+        // OIDC not available, silently ignore
+      }
+    };
+    void checkOidc();
   }, [location.search]);
 
   useEffect(() => {
@@ -449,6 +478,46 @@ function Login() {
             </Button>
             <Button onClick={passkey}>passkey</Button>
           </div>
+          {oidcEnabled && (
+            <>
+              <Divider plain style={{ margin: '16px 0 12px', color: '#999', fontSize: 12 }}>或</Divider>
+              <div className="login-actions">
+                <Button
+                  block
+                  icon={<LoginOutlined />}
+                  loading={oidcLoading}
+                  onClick={async () => {
+                    setOidcLoading(true);
+                    try {
+                      const client = createClient();
+                      const res = await client.get('/api/oidc/login-url', {
+                        headers: { 'Content-Type': 'application/json' },
+                      });
+                      if (res.jsonData?.status && res.jsonData?.data?.authUrl) {
+                        window.location.href = res.jsonData.data.authUrl;
+                      } else {
+                        setNotice(res.jsonData?.message || 'OIDC 登录不可用');
+                      }
+                    } catch {
+                      setNotice('OIDC 登录请求失败');
+                    } finally {
+                      setOidcLoading(false);
+                    }
+                  }}
+                  style={{
+                    background: 'linear-gradient(135deg, #722ed1, #1890ff)',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 8,
+                    height: 40,
+                    fontWeight: 600,
+                  }}
+                >
+                  使用 OIDC 登录
+                </Button>
+              </div>
+            </>
+          )}
         </div>
         <div className={state.loginStep === 'BIND' ? 'login-panel' : 'hide'}>
           <div className="login-panel-head">

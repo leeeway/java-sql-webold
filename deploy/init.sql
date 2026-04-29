@@ -89,6 +89,7 @@ CREATE TABLE `user_tb` (
   `auth_status` varchar(45) NOT NULL DEFAULT 'UNBIND' COMMENT '密保绑定状态',
   `login_status` VARCHAR(45) NOT NULL DEFAULT 'LOGGING',
   `account_status` VARCHAR(45) NOT NULL DEFAULT 'ACTIVE' COMMENT '账号状态',
+  `oidc_sub` VARCHAR(256) NULL COMMENT 'OIDC Subject 标识',
   `access_token_hash` VARCHAR(64) NULL COMMENT '长期访问令牌哈希',
   `access_token_expire_time` datetime NULL COMMENT '访问令牌过期时间'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -96,7 +97,8 @@ CREATE TABLE `user_tb` (
 ALTER TABLE `user_tb`
   ADD PRIMARY KEY (`code`),
   ADD UNIQUE KEY `uk_user_name` (`user_name`),
-  ADD UNIQUE KEY `uk_email` (`email`);
+  ADD UNIQUE KEY `uk_email` (`email`),
+  ADD UNIQUE KEY `uk_oidc_sub` (`oidc_sub`);
 
 ALTER TABLE `user_tb`
   MODIFY `code` int(11) NOT NULL AUTO_INCREMENT;

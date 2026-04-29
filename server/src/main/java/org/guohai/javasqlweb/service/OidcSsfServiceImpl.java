@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.guohai.javasqlweb.beans.*;
 import org.guohai.javasqlweb.config.OidcSsfConfig;
 import org.guohai.javasqlweb.dao.OidcConfigDao;
+import org.guohai.javasqlweb.dao.UserManageDao;
+import org.guohai.javasqlweb.util.PasswordUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -36,6 +38,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
 
     private final OidcSsfConfig config;
     private final OidcConfigDao oidcConfigDao;
+    private final UserManageDao userManageDao;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
 
@@ -56,9 +59,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     private final CopyOnWriteArrayList<SsfEvent> eventLog = new CopyOnWriteArrayList<>();
     private static final int MAX_EVENT_LOG = 500;
 
-    public OidcSsfServiceImpl(OidcSsfConfig config, OidcConfigDao oidcConfigDao, ObjectMapper objectMapper) {
+    public OidcSsfServiceImpl(OidcSsfConfig config, OidcConfigDao oidcConfigDao,
+                               UserManageDao userManageDao, ObjectMapper objectMapper) {
         this.config = config;
         this.oidcConfigDao = oidcConfigDao;
+        this.userManageDao = userManageDao;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -518,6 +523,184 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     private void clearDiscoveryCache() {
         this.oidcDiscovery = null;
         this.ssfDiscovery = null;
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  OIDC Login
+    // ════════════════════════════════════════════════════════
+
+    @Override
+    public boolean isOidcLoginEnabled() {
+        try {
+            OidcConfigBean cfg = getEffectiveConfig();
+            return cfg != null
+                    && Boolean.TRUE.equals(cfg.getEnabled())
+                    && cfg.getClientId() != null && !cfg.getClientId().isBlank()
+                    && cfg.getIssuer() != null && !cfg.getIssuer().isBlank();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @Override
+    public Map<String, String> buildLoginAuthorizationUrl() {
+        String state = generateRandomString(32);
+        String codeVerifier = generateRandomString(64);
+        String codeChallenge = computeS256Challenge(codeVerifier);
+
+        pkceStore.put(state, codeVerifier);
+
+        OidcConfigBean effectiveConfig = getEffectiveConfig();
+        String authEndpoint = disc("authorization_endpoint");
+        String scopes = "openid email profile";
+
+        // 登录回调使用专门的 login/callback 路径
+        String loginCallbackUrl = effectiveConfig.getCallbackUrl()
+                .replace("/api/oidc/callback", "/api/oidc/login/callback");
+
+        String url = authEndpoint
+                + "?response_type=code"
+                + "&client_id=" + enc(effectiveConfig.getClientId())
+                + "&redirect_uri=" + enc(loginCallbackUrl)
+                + "&scope=" + enc(scopes)
+                + "&state=" + enc(state)
+                + "&code_challenge=" + enc(codeChallenge)
+                + "&code_challenge_method=S256";
+
+        return Map.of("authUrl", url, "state", state);
+    }
+
+    @Override
+    public Result<UserBean> handleLoginCallback(String code, String state) {
+        String codeVerifier = pkceStore.remove(state);
+        if (codeVerifier == null) {
+            return new Result<>(false, "Invalid state parameter", null);
+        }
+
+        OidcConfigBean effectiveConfig = getEffectiveConfig();
+        String loginCallbackUrl = effectiveConfig.getCallbackUrl()
+                .replace("/api/oidc/callback", "/api/oidc/login/callback");
+
+        // 1. 换取令牌
+        String tokenEndpoint = disc("token_endpoint");
+        String body = "grant_type=authorization_code"
+                + "&code=" + enc(code)
+                + "&redirect_uri=" + enc(loginCallbackUrl)
+                + "&client_id=" + enc(effectiveConfig.getClientId())
+                + "&client_secret=" + enc(effectiveConfig.getClientSecret())
+                + "&code_verifier=" + enc(codeVerifier);
+
+        Map<String, Object> tokenResponse;
+        try {
+            tokenResponse = httpPostForm(tokenEndpoint, body);
+        } catch (Exception e) {
+            LOG.error("OIDC login token exchange failed", e);
+            return new Result<>(false, "Token exchange failed: " + e.getMessage(), null);
+        }
+
+        String accessToken = strVal(tokenResponse, "access_token");
+        if (accessToken == null || accessToken.isEmpty()) {
+            return new Result<>(false, "No access_token in response", null);
+        }
+
+        // 2. 获取 userinfo
+        Map<String, Object> userInfoData;
+        try {
+            String userinfoEndpoint = disc("userinfo_endpoint");
+            userInfoData = httpGetJsonAuth(userinfoEndpoint, accessToken);
+        } catch (Exception e) {
+            LOG.error("OIDC login userinfo failed", e);
+            return new Result<>(false, "Failed to fetch userinfo: " + e.getMessage(), null);
+        }
+
+        String sub = strVal(userInfoData, "sub");
+        String email = strVal(userInfoData, "email");
+        String preferredUsername = strVal(userInfoData, "preferred_username");
+        String name = strVal(userInfoData, "name");
+
+        if (sub == null || sub.isBlank()) {
+            return new Result<>(false, "OIDC provider did not return sub", null);
+        }
+
+        // 3. 查找或创建用户
+        UserBean user = findOrCreateOidcUser(sub, email, preferredUsername, name);
+        if (user == null) {
+            return new Result<>(false, "Failed to create/find user", null);
+        }
+
+        // 4. 签发 JSW token
+        String jswToken = UUID.randomUUID().toString();
+        userManageDao.setUserToken(user.getUserName(), jswToken);
+        userManageDao.setUserLoginSuccess(jswToken);
+        user.setToken(jswToken);
+
+        LOG.info("OIDC login successful: sub={}, user={}", sub, user.getUserName());
+        return new Result<>(true, "OIDC login success", user);
+    }
+
+    /**
+     * 按 sub → email → 创建 的优先级查找/创建用户
+     */
+    private UserBean findOrCreateOidcUser(String sub, String email, String preferredUsername, String displayName) {
+        // 1. 按 oidc_sub 查找
+        UserBean user = userManageDao.getUserByOidcSub(sub);
+        if (user != null) {
+            LOG.info("OIDC login: found existing user by sub={}: {}", sub, user.getUserName());
+            return user;
+        }
+
+        // 2. 按 email 匹配并绑定
+        if (email != null && !email.isBlank()) {
+            user = userManageDao.getUserByEmail(email);
+            if (user != null) {
+                userManageDao.updateOidcSub(user.getCode(), sub);
+                LOG.info("OIDC login: linked sub={} to existing user {} by email", sub, user.getUserName());
+                return user;
+            }
+        }
+
+        // 3. 自动创建新用户
+        String userName = deriveUserName(preferredUsername, email, sub);
+        if (email == null || email.isBlank()) {
+            email = userName + "@oidc.local";
+        }
+        String randomPassword = PasswordUtils.encode(UUID.randomUUID().toString());
+
+        try {
+            userManageDao.addNewOidcUser(userName, email, randomPassword, sub);
+            user = userManageDao.getUserByOidcSub(sub);
+            LOG.info("OIDC login: created new user {} for sub={}", userName, sub);
+            return user;
+        } catch (Exception e) {
+            LOG.error("Failed to create OIDC user: {}", userName, e);
+            return null;
+        }
+    }
+
+    /**
+     * 从 OIDC userinfo 派生唯一用户名
+     */
+    private String deriveUserName(String preferredUsername, String email, String sub) {
+        // 优先 preferred_username
+        if (preferredUsername != null && !preferredUsername.isBlank()) {
+            String candidate = preferredUsername.trim().toLowerCase().replaceAll("[^a-z0-9._-]", "_");
+            if (!candidate.isEmpty() && userManageDao.getUserByName(candidate) == null) {
+                return candidate;
+            }
+        }
+        // 其次 email 前缀
+        if (email != null && email.contains("@")) {
+            String candidate = email.substring(0, email.indexOf('@')).trim().toLowerCase().replaceAll("[^a-z0-9._-]", "_");
+            if (!candidate.isEmpty() && userManageDao.getUserByName(candidate) == null) {
+                return candidate;
+            }
+        }
+        // 最后用 sub 的前 16 位
+        String candidate = "oidc_" + sub.replaceAll("[^a-zA-Z0-9]", "").substring(0, Math.min(sub.length(), 16)).toLowerCase();
+        if (userManageDao.getUserByName(candidate) != null) {
+            candidate = candidate + "_" + System.currentTimeMillis() % 10000;
+        }
+        return candidate;
     }
 
     // ════════════════════════════════════════════════════════

@@ -126,4 +126,26 @@ public interface OidcSsfService {
      * @return 测试结果
      */
     Result<Map<String, Object>> testOidcConnection(String issuer);
+
+    // ── OIDC Login ──────────────────────────────────────
+
+    /**
+     * 检查 OIDC 登录是否可用
+     * @return 是否可用
+     */
+    boolean isOidcLoginEnabled();
+
+    /**
+     * 构建登录用的 OIDC 授权 URL
+     * @return 包含 authUrl 和 state 的 Map
+     */
+    Map<String, String> buildLoginAuthorizationUrl();
+
+    /**
+     * 处理 OIDC 登录回调：换令牌 → 取 userinfo → 查找/创建用户 → 签发 token
+     * @param code 授权码
+     * @param state 状态参数
+     * @return 包含 token 的用户信息
+     */
+    Result<UserBean> handleLoginCallback(String code, String state);
 }

@@ -60,6 +60,11 @@ public class UserBean {
     private AccountStatus accountStatus;
 
     /**
+     * OIDC Subject 标识
+     */
+    private String oidcSub;
+
+    /**
      * 一次密码
      */
     private String otpPass;
