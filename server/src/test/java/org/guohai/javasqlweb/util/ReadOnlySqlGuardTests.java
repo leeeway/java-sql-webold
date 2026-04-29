@@ -23,6 +23,22 @@ class ReadOnlySqlGuardTests {
     }
 
     @Test
+    void shouldAllowMssqlDeclareThenSelectWithoutSemicolon() {
+        assertNull(ReadOnlySqlGuard.validate(
+                "DECLARE @end_time DATETIME='2025-06-07 00:00:00'\nSELECT @end_time",
+                "mssql"
+        ));
+    }
+
+    @Test
+    void shouldAllowMssqlSetThenSelectWithoutSemicolon() {
+        assertNull(ReadOnlySqlGuard.validate(
+                "SET @x = 1\nSELECT @x",
+                "mssql"
+        ));
+    }
+
+    @Test
     void shouldAllowMssqlDeclarePlusCteStatements() {
         assertNull(ReadOnlySqlGuard.validate(
                 "DECLARE @dts DATETIME = GETDATE(); ;WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;",
@@ -51,6 +67,22 @@ class ReadOnlySqlGuardTests {
         assertEquals(
                 "仅允许只读查询；多语句中包含不允许的子语句",
                 ReadOnlySqlGuard.validate("DECLARE @items TABLE (id INT); SELECT 1;", "mssql")
+        );
+    }
+
+    @Test
+    void shouldRejectMssqlDeclareThenDeleteWithoutSemicolon() {
+        assertEquals(
+                "仅允许只读查询；多语句中包含不允许的子语句",
+                ReadOnlySqlGuard.validate("DECLARE @x INT\nDELETE FROM t", "mssql")
+        );
+    }
+
+    @Test
+    void shouldRejectMssqlTableVariableDeclareWithoutSemicolon() {
+        assertEquals(
+                "仅允许只读查询；多语句中包含不允许的子语句",
+                ReadOnlySqlGuard.validate("DECLARE @items TABLE (id INT)\nSELECT 1", "mssql")
         );
     }
 

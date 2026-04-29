@@ -16,22 +16,95 @@ public final class ReadOnlySqlGuard {
 
     public static String validate(String sql, String dbType) {
         for (String statement : splitStatements(sql)) {
-            String normalized = stripStringsAndComments(statement);
-            String trimmed = normalized.trim();
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-            if (isAllowedVariableStatement(trimmed, dbType)) {
-                continue;
-            }
+            for (String candidate : expandMssqlVariableAndReadOnlyBatch(statement, dbType)) {
+                String candidateTrimmed = candidate == null ? "" : candidate.trim();
+                if (candidateTrimmed.isEmpty()) {
+                    continue;
+                }
+                if (isAllowedVariableStatement(candidateTrimmed, dbType)) {
+                    continue;
+                }
 
-            String firstKeyword = extractFirstKeyword(trimmed);
-            if (isAllowedReadOnlyStatement(trimmed, firstKeyword)) {
-                continue;
+                String normalized = stripStringsAndComments(candidate);
+                String trimmed = normalized.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+
+                String firstKeyword = extractFirstKeyword(trimmed);
+                if (isAllowedReadOnlyStatement(trimmed, firstKeyword)) {
+                    continue;
+                }
+                return READ_ONLY_ERROR;
             }
-            return READ_ONLY_ERROR;
         }
         return null;
+    }
+
+    private static List<String> expandMssqlVariableAndReadOnlyBatch(String statement, String dbType) {
+        List<String> statements = new ArrayList<>();
+        statements.add(statement);
+        if (!"mssql".equalsIgnoreCase(dbType)) {
+            return statements;
+        }
+        String sanitized = stripStringsAndComments(statement);
+        String trimmed = sanitized.trim();
+        if (trimmed.isEmpty()) {
+            return statements;
+        }
+        String firstKeyword = extractFirstKeyword(trimmed);
+        if (!"DECLARE".equals(firstKeyword) && !"SET".equals(firstKeyword)) {
+            return statements;
+        }
+
+        int splitIndex = findTopLevelSelectOrWithIndex(sanitized);
+        if (splitIndex <= 0 || splitIndex >= statement.length()) {
+            return statements;
+        }
+        String variableStatement = statement.substring(0, splitIndex).trim();
+        String readOnlyStatement = statement.substring(splitIndex).trim();
+        if (variableStatement.isEmpty() || readOnlyStatement.isEmpty()) {
+            return statements;
+        }
+        statements.clear();
+        statements.add(variableStatement);
+        statements.add(readOnlyStatement);
+        return statements;
+    }
+
+    private static int findTopLevelSelectOrWithIndex(String sql) {
+        int depth = 0;
+        boolean seenKeyword = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char currentChar = sql.charAt(i);
+            if (currentChar == '(') {
+                depth++;
+                continue;
+            }
+            if (currentChar == ')') {
+                if (depth > 0) {
+                    depth--;
+                }
+                continue;
+            }
+            if (depth != 0 || !Character.isLetter(currentChar)) {
+                continue;
+            }
+            int start = i;
+            while (i < sql.length() && (Character.isLetter(sql.charAt(i)) || sql.charAt(i) == '_')) {
+                i++;
+            }
+            String keyword = sql.substring(start, i).toUpperCase(Locale.ROOT);
+            if (!seenKeyword) {
+                seenKeyword = true;
+                continue;
+            }
+            if ("SELECT".equals(keyword) || "WITH".equals(keyword)) {
+                return start;
+            }
+            i--;
+        }
+        return -1;
     }
 
     static List<String> splitStatements(String sql) {
@@ -158,6 +231,10 @@ public final class ReadOnlySqlGuard {
         if (body.isEmpty()) {
             return false;
         }
+        String sanitizedBody = stripStringsAndComments(body).toUpperCase(Locale.ROOT);
+        if (sanitizedBody.matches("(?s).*\\b(SELECT|DELETE|UPDATE|INSERT|MERGE|EXEC|USE)\\b.*")) {
+            return false;
+        }
         for (String declaration : splitTopLevelCommaSegments(body)) {
             if (!isAllowedMssqlScalarDeclaration(declaration)) {
                 return false;
@@ -235,6 +312,10 @@ public final class ReadOnlySqlGuard {
 
         String typeClause = declaration.substring(typeStart, index).trim();
         if (typeClause.isEmpty()) {
+            return false;
+        }
+        if (typeClause.toUpperCase(Locale.ROOT)
+                .matches("(?s).*\\b(SELECT|DELETE|UPDATE|INSERT|MERGE|WITH|EXEC|FROM|WHERE|JOIN)\\b.*")) {
             return false;
         }
         String normalizedType = typeClause.toUpperCase(Locale.ROOT);

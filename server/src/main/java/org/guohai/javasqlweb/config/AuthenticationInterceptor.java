@@ -46,6 +46,11 @@ public class AuthenticationInterceptor  implements HandlerInterceptor {
      */
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        // 外部回调端点不需要登录验证
+        String uri = request.getRequestURI();
+        if ("/api/oidc/callback".equals(uri) || "/api/ssf/events".equals(uri)) {
+            return true;
+        }
         // 如果不是映射到方法直接通过
         if (!(handler instanceof HandlerMethod)) {
             return true;

@@ -1,7 +1,7 @@
 module.exports = {
   rootDir: '.',
   testEnvironment: 'jsdom',
-  setupFilesAfterEnv: ['<rootDir>/src/app/setupTests.js'],
+  setupFilesAfterEnv: ['<rootDir>/src/app/setupTests.ts'],
   transform: {
     '^.+\\.[jt]sx?$': [
       'babel-jest',
@@ -9,6 +9,7 @@ module.exports = {
         presets: [
           ['@babel/preset-env', { targets: { node: 'current' } }],
           ['@babel/preset-react', { runtime: 'automatic' }],
+          '@babel/preset-typescript',
         ],
       },
     ],

@@ -22,11 +22,6 @@ export default defineConfig(({ mode }) => {
         include: /\.[jt]sx?$/,
       }),
     ],
-    esbuild: {
-      loader: 'jsx',
-      include: /src\/.*\.[jt]sx?$/,
-      exclude: [],
-    },
     build: {
       outDir: 'dist',
     },
@@ -39,9 +34,6 @@ export default defineConfig(({ mode }) => {
       esbuildOptions: {
         define: {
           global: 'globalThis',
-        },
-        loader: {
-          '.js': 'jsx',
         },
       },
     },
