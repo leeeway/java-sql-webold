@@ -158,6 +158,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         String state = generateRandomString(32);
         String codeVerifier = generateRandomString(64);
         String codeChallenge = computeS256Challenge(codeVerifier);
+        String nonce = computeS256Challenge(codeVerifier);
 
         pkceStore.put(state, codeVerifier);
 
@@ -172,7 +173,8 @@ public class OidcSsfServiceImpl implements OidcSsfService {
                 + "&scope=" + enc(scopes)
                 + "&state=" + enc(state)
                 + "&code_challenge=" + enc(codeChallenge)
-                + "&code_challenge_method=S256";
+                + "&code_challenge_method=S256"
+                + "&nonce=" + enc(nonce);
 
         return Map.of("authUrl", url, "state", state);
     }
@@ -196,6 +198,13 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         try {
             Map<String, Object> tokenResponse = httpPostForm(tokenEndpoint, body);
             OidcTokenInfo tokens = parseTokenResponse(tokenResponse);
+
+            // 验证 id_token 中的 nonce（从 code_verifier 派生期望值）
+            String expectedNonce = computeS256Challenge(codeVerifier);
+            if (!verifyIdTokenNonce(tokens.getIdToken(), expectedNonce)) {
+                return new Result<>(false, "id_token nonce verification failed", null);
+            }
+
             storedTokens = tokens;
 
             // 自动获取 userinfo
@@ -547,6 +556,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         String state = generateRandomString(32);
         String codeVerifier = generateRandomString(64);
         String codeChallenge = computeS256Challenge(codeVerifier);
+        String nonce = computeS256Challenge(codeVerifier);
 
         pkceStore.put(state, codeVerifier);
 
@@ -565,7 +575,8 @@ public class OidcSsfServiceImpl implements OidcSsfService {
                 + "&scope=" + enc(scopes)
                 + "&state=" + enc(state)
                 + "&code_challenge=" + enc(codeChallenge)
-                + "&code_challenge_method=S256";
+                + "&code_challenge_method=S256"
+                + "&nonce=" + enc(nonce);
 
         return Map.of("authUrl", url, "state", state);
     }
@@ -596,6 +607,13 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         } catch (Exception e) {
             LOG.error("OIDC login token exchange failed", e);
             return new Result<>(false, "Token exchange failed: " + e.getMessage(), null);
+        }
+
+        // 验证 id_token 中的 nonce（从 code_verifier 派生期望值）
+        String idToken = strVal(tokenResponse, "id_token");
+        String expectedNonce = computeS256Challenge(codeVerifier);
+        if (!verifyIdTokenNonce(idToken, expectedNonce)) {
+            return new Result<>(false, "id_token nonce verification failed", null);
         }
 
         String accessToken = strVal(tokenResponse, "access_token");
@@ -915,6 +933,40 @@ public class OidcSsfServiceImpl implements OidcSsfService {
             return Base64.getUrlEncoder().withoutPadding().encodeToString(hash);
         } catch (Exception e) {
             throw new RuntimeException("SHA-256 not available", e);
+        }
+    }
+
+    /**
+     * 验证 id_token (JWT) 中的 nonce 是否与期望值一致。
+     * nonce 从 code_verifier 派生 (SHA-256)，无需额外存储。
+     * 仅解析 JWT payload，不做签名验证（签名安全性由 TLS + token endpoint 保证）。
+     */
+    private boolean verifyIdTokenNonce(String idToken, String expectedNonce) {
+        if (idToken == null || idToken.isBlank()) {
+            LOG.warn("No id_token returned, skipping nonce verification");
+            return true;
+        }
+        try {
+            String[] parts = idToken.split("\\.");
+            if (parts.length < 2) {
+                LOG.warn("Invalid id_token format, skipping nonce verification");
+                return true;
+            }
+            String payloadJson = new String(
+                    Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+            Map<String, Object> payload = objectMapper.readValue(
+                    payloadJson, new TypeReference<>() {});
+            String actualNonce = strVal(payload, "nonce");
+            if (!expectedNonce.equals(actualNonce)) {
+                LOG.error("id_token nonce mismatch: expected={}, actual={}",
+                        expectedNonce, actualNonce);
+                return false;
+            }
+            LOG.debug("id_token nonce verified successfully");
+            return true;
+        } catch (Exception e) {
+            LOG.error("Failed to verify id_token nonce", e);
+            return false;
         }
     }
 

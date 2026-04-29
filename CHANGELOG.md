@@ -2,6 +2,16 @@
 
 本文件记录当前 `master` 分支之后到当前 `develop` 工作区的主要变更，按版本和当前未发布改动整理。
 
+## v2.11.2 - 2026-04-29
+
+### Added
+- OIDC 授权请求新增 `nonce` 参数支持，防止 id_token 重放攻击，满足 Apple ABM 等严格 Provider 的合规要求。
+- `nonce` 从 `code_verifier` 派生 (SHA-256)，无需额外存储，回调时重新计算并与 id_token 中的 `nonce` claim 比对验证。
+- 新增 `verifyIdTokenNonce()` 方法，解析 id_token JWT payload 进行 nonce 一致性校验。
+
+### Changed
+- Admin SSF 授权流程 (`buildAuthorizationUrl` / `exchangeCodeForTokens`) 和用户登录流程 (`buildLoginAuthorizationUrl` / `handleLoginCallback`) 均已支持 nonce。
+
 ## v2.10.1 - 2026-04-28
 
 ### Fixed
