@@ -7,6 +7,9 @@ import org.guohai.javasqlweb.beans.PoolStatBean;
 import org.guohai.javasqlweb.beans.QueryLogBean;
 import org.guohai.javasqlweb.beans.QueryLogCursorResponse;
 import org.guohai.javasqlweb.beans.Result;
+import org.guohai.javasqlweb.beans.ServerDatabaseSyncResult;
+import org.guohai.javasqlweb.beans.TargetPoolStatBean;
+import org.guohai.javasqlweb.beans.TargetSessionStatBean;
 import org.guohai.javasqlweb.beans.UserBean;
 import org.springframework.web.bind.annotation.RequestBody;
 
@@ -32,10 +35,38 @@ public interface BackstageService {
     Result<List<ConnectConfigBean>> getConnData();
 
     /**
+     * 获取连接表（支持关键字、类型、库名筛选）
+     * @param keyword 服务器名关键字（包含匹配）
+     * @param serverType 服务器类型
+     * @param dbName 数据库名（全等匹配）
+     * @return
+     */
+    Result<List<ConnectConfigBean>> getConnData(String keyword, String serverType, String dbName);
+
+    /**
+     * 同步所有实例的库名快照
+     * @return 同步统计结果
+     */
+    Result<ServerDatabaseSyncResult> syncServerDatabases();
+
+    /**
      * 获取连接池摘要
      * @return 连接池信息
      */
     Result<List<PoolStatBean>> getPoolStats();
+
+    /**
+     * 获取动态目标库连接池运行时快照
+     * @return
+     */
+    Result<List<TargetPoolStatBean>> getTargetPoolStats();
+
+    /**
+     * 获取指定目标库的动态连接会话明细
+     * @param code 服务器编号
+     * @return 会话明细
+     */
+    Result<List<TargetSessionStatBean>> getTargetPoolSessions(Integer code);
 
     /**
      * 测试数据库连接性
@@ -43,6 +74,13 @@ public interface BackstageService {
      * @return
      */
     Result<String> testServerConnect(@RequestBody ConnectConfigBean server);
+
+    /**
+     * 测试已保存服务器配置的数据库连接性
+     * @param code 服务器编号
+     * @return
+     */
+    Result<String> testSavedServerConnect(Integer code);
     /**
      * 增加服务器
      * @param server
@@ -100,6 +138,13 @@ public interface BackstageService {
      * @return
      */
     Result<String> delServer(Integer code);
+
+    /**
+     * 重置指定服务器的动态连接池与冷却状态
+     * @param code
+     * @return
+     */
+    Result<String> resetServer(Integer code);
 
     /**
      * 通过有效token修改用户密码

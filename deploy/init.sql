@@ -23,6 +23,23 @@ ALTER TABLE `db_connect_config_tb`
 ALTER TABLE `db_connect_config_tb`
   MODIFY `code` int(11) NOT NULL AUTO_INCREMENT;
 
+-- 服务器库名快照表
+CREATE TABLE `db_server_database_snapshot_tb` (
+  `id` bigint(20) NOT NULL COMMENT '自增值',
+  `server_code` int(11) NOT NULL COMMENT '实例编号',
+  `database_name` varchar(128) NOT NULL COMMENT '库名',
+  `synced_at` datetime NOT NULL COMMENT '同步时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `db_server_database_snapshot_tb`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `uk_server_database` (`server_code`,`database_name`),
+  ADD KEY `idx_database_name` (`database_name`),
+  ADD KEY `idx_synced_at` (`synced_at`);
+
+ALTER TABLE `db_server_database_snapshot_tb`
+  MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
+
 
 -- 使用都日志表
 CREATE TABLE `db_query_log` (
@@ -31,6 +48,7 @@ CREATE TABLE `db_query_log` (
   `query_name` varchar(45) NOT NULL COMMENT '查询人',
   `query_database` varchar(45) NOT NULL COMMENT '查询语句的库',
   `server_code` int(11) NULL COMMENT '查询目标实例',
+  `db_session_id` varchar(64) NULL COMMENT '目标库会话ID',
   `query_sqlscript` varchar(8000) NOT NULL COMMENT '查询脚本',
   `query_consuming` int(11) NULL COMMENT '查询耗时',
   `result_row_count` int(11) NULL COMMENT '返回条数',
@@ -38,7 +56,8 @@ CREATE TABLE `db_query_log` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 ALTER TABLE `db_query_log`
-  ADD PRIMARY KEY (`code`);
+  ADD PRIMARY KEY (`code`),
+  ADD KEY `idx_server_session` (`server_code`,`db_session_id`);
 
 ALTER TABLE `db_query_log`
   MODIFY `code` int(11) NOT NULL AUTO_INCREMENT;
@@ -70,6 +89,7 @@ CREATE TABLE `user_tb` (
   `auth_status` varchar(45) NOT NULL DEFAULT 'UNBIND' COMMENT '密保绑定状态',
   `login_status` VARCHAR(45) NOT NULL DEFAULT 'LOGGING',
   `account_status` VARCHAR(45) NOT NULL DEFAULT 'ACTIVE' COMMENT '账号状态',
+  `oidc_sub` VARCHAR(256) NULL COMMENT 'OIDC Subject 标识',
   `access_token_hash` VARCHAR(64) NULL COMMENT '长期访问令牌哈希',
   `access_token_expire_time` datetime NULL COMMENT '访问令牌过期时间'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -77,7 +97,8 @@ CREATE TABLE `user_tb` (
 ALTER TABLE `user_tb`
   ADD PRIMARY KEY (`code`),
   ADD UNIQUE KEY `uk_user_name` (`user_name`),
-  ADD UNIQUE KEY `uk_email` (`email`);
+  ADD UNIQUE KEY `uk_email` (`email`),
+  ADD UNIQUE KEY `uk_oidc_sub` (`oidc_sub`);
 
 ALTER TABLE `user_tb`
   MODIFY `code` int(11) NOT NULL AUTO_INCREMENT;
@@ -135,11 +156,22 @@ CREATE TABLE `guid_sql_tb` (
     `create_date` datetime NOT NULL COMMENT '时间',
         PRIMARY KEY (`code`));
 
--- 安全起见，不再默认创建弱口令管理员账号。
--- 首次部署后请手动创建管理员，并使用 BCrypt 哈希写入 pass_word 字段。
--- 示例：
--- INSERT INTO `user_tb` (`user_name`,`pass_word`,`token`,`auth_status`,`login_status`)
--- VALUES ('admin','<bcrypt-hash>','','UNBIND','LOGOUT');
+-- 应用启动时若 user_tb 中不存在 admin 用户，
+-- server 会自动创建 admin@local.invalid / 随机密码 的管理员账号，
+-- 并将明文随机密码打印到 server 控制台日志中，便于通过 docker logs 查看。
+
+-- OIDC 配置表
+CREATE TABLE `oidc_config_tb` (
+  `code`           INT          NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `client_id`      VARCHAR(256) NOT NULL COMMENT 'OIDC Client ID',
+  `client_secret`  VARCHAR(512) NOT NULL COMMENT 'OIDC Client Secret',
+  `issuer`         VARCHAR(512) NOT NULL COMMENT 'OIDC Issuer URL',
+  `callback_url`   VARCHAR(512) NOT NULL COMMENT 'OIDC 回调地址',
+  `enabled`        TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '是否启用',
+  `created_time`   DATETIME     NOT NULL COMMENT '创建时间',
+  `updated_time`   DATETIME     NOT NULL COMMENT '更新时间',
+  PRIMARY KEY (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 COMMIT;
 
@@ -153,7 +185,18 @@ CREATE TABLE `passkey_auths_tb` (
                                     `user_agent` VARCHAR(200) NOT NULL COMMENT 'user agent',
                                     `create_date` datetime NOT NULL COMMENT '时间',
                                     PRIMARY KEY (`code`));
-);
+
+CREATE TABLE `webauthn_request_tb` (
+                                     `code` INT NOT NULL AUTO_INCREMENT,
+                                     `request_type` VARCHAR(32) NOT NULL COMMENT '请求类型',
+                                     `request_key` VARCHAR(128) NOT NULL COMMENT '请求关联键',
+                                     `request_json` TEXT NOT NULL COMMENT '序列化后的请求',
+                                     `expire_time` datetime NOT NULL COMMENT '过期时间',
+                                     `created_time` datetime NOT NULL COMMENT '创建时间',
+                                     PRIMARY KEY (`code`),
+                                     UNIQUE KEY `uk_type_key` (`request_type`,`request_key`),
+                                     KEY `idx_expire_time` (`expire_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 --ALTER TABLE `javasqlweb_db`.`user_tb`
 --ADD COLUMN `auth_secret` VARCHAR(45) NULL AFTER `token`,
@@ -161,6 +204,9 @@ CREATE TABLE `passkey_auths_tb` (
 --ADD COLUMN `login_status` VARCHAR(45) NOT NULL DEFAULT 'LOGGING' AFTER `auth_status`;
 -- ALTER TABLE `javasqlweb_db`.`db_query_log`
 -- ADD COLUMN `query_database` VARCHAR(45) NULL AFTER `query_name`;
+-- ALTER TABLE `javasqlweb_db`.`db_query_log`
+-- ADD COLUMN `db_session_id` VARCHAR(64) NULL COMMENT '目标库会话ID' AFTER `server_code`,
+-- ADD KEY `idx_server_session` (`server_code`,`db_session_id`);
 
 -- ALTER TABLE `javasqlweb_db`.`db_connect_config_tb`
 -- ADD COLUMN `db_ssl_mode` VARCHAR(32) NOT NULL DEFAULT 'DEFAULT' COMMENT '连接安全模式' AFTER `db_server_type`,

@@ -4,9 +4,13 @@ import jakarta.annotation.PreDestroy;
 import org.guohai.javasqlweb.beans.*;
 import org.guohai.javasqlweb.dao.BaseConfigDao;
 import org.guohai.javasqlweb.dao.QueryLogTargetDao;
+import org.guohai.javasqlweb.service.dashboard.WorkbenchDashboardProvider;
+import org.guohai.javasqlweb.service.dashboard.WorkbenchDashboardProviderFactory;
 import org.guohai.javasqlweb.service.operation.DbOperation;
 import org.guohai.javasqlweb.service.operation.DbOperationFactory;
 import org.guohai.javasqlweb.util.AuditSqlMaskingUtils;
+import org.guohai.javasqlweb.util.DbServerTypeUtils;
+import org.guohai.javasqlweb.util.MssqlQueryBatchParser;
 import org.guohai.javasqlweb.util.ReadOnlySqlGuard;
 import org.guohai.javasqlweb.util.SqlTargetExtractor;
 import org.slf4j.Logger;
@@ -20,8 +24,10 @@ import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientConnectionException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -35,6 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Service
 public class BaseDataServiceImpl implements BaseDataService{
+    private static final String DB_SESSION_ID_COLUMN = "db_session_id";
 
     /**
      * 日志
@@ -48,6 +55,9 @@ public class BaseDataServiceImpl implements BaseDataService{
 
     @Value("${project.limit}")
     private Integer limit;
+
+    @Value("${project.target-query-timeout-seconds:30}")
+    private Integer targetQueryTimeoutSeconds;
     /**
      * 服务器实例集合
      */
@@ -62,6 +72,10 @@ public class BaseDataServiceImpl implements BaseDataService{
 
     private static final Map<Integer, String> connectionLastErrorMap = new ConcurrentHashMap<>();
 
+    private static final Map<Integer, WorkbenchDashboardCacheEntry> workbenchServerDashboardCache = new ConcurrentHashMap<>();
+
+    private static final Map<String, WorkbenchDashboardCacheEntry> workbenchDatabaseDashboardCache = new ConcurrentHashMap<>();
+
     /**
      * sql最大保存长度
      */
@@ -71,6 +85,20 @@ public class BaseDataServiceImpl implements BaseDataService{
 
     private static final long CONNECTION_FAILURE_COOLDOWN_MILLIS = 5 * 60 * 1000L;
 
+    private static final long WORKBENCH_DASHBOARD_CACHE_MILLIS = 10 * 60 * 1000L;
+
+    private static class WorkbenchDashboardCacheEntry {
+        private final List<WorkbenchDashboardSection> sections;
+        private final long cachedAt;
+        private final long expiresAt;
+
+        private WorkbenchDashboardCacheEntry(List<WorkbenchDashboardSection> sections, long cachedAt, long expiresAt) {
+            this.sections = sections;
+            this.cachedAt = cachedAt;
+            this.expiresAt = expiresAt;
+        }
+    }
+
     @FunctionalInterface
     private interface OperationAction<T> {
         T execute(DbOperation operation) throws Exception;
@@ -78,7 +106,7 @@ public class BaseDataServiceImpl implements BaseDataService{
 
     @Override
     public Result<List<ConnectConfigBean>> getAllDataConnect() {
-        return new Result<>(true,"", baseConfigDao.getAllConnectConfig());
+        return new Result<>(true,"", DbServerTypeUtils.normalize(baseConfigDao.getAllConnectConfig()));
     }
 
     /**
@@ -91,7 +119,7 @@ public class BaseDataServiceImpl implements BaseDataService{
         if (permissionCheck != null) {
             return permissionCheck;
         }
-        ConnectConfigBean connBean = baseConfigDao.getConnectConfig(serverCode);
+        ConnectConfigBean connBean = DbServerTypeUtils.normalize(baseConfigDao.getConnectConfig(serverCode));
         connBean.setDbServerPassword("");
         connBean.setDbServerUsername("");
         connBean.setDbServerHost("");
@@ -261,8 +289,19 @@ public class BaseDataServiceImpl implements BaseDataService{
         if (permissionCheck != null) {
             return permissionCheck;
         }
-        ConnectConfigBean connectConfigBean = baseConfigDao.getConnectConfig(serverCode);
-        String guardResult = ReadOnlySqlGuard.validate(sql, connectConfigBean == null ? "" : connectConfigBean.getDbServerType());
+        ConnectConfigBean connectConfigBean = DbServerTypeUtils.normalize(baseConfigDao.getConnectConfig(serverCode));
+        String dbType = connectConfigBean == null ? "" : connectConfigBean.getDbServerType();
+        String effectiveDbName = dbName;
+        String executableSql = sql;
+        if (DbServerTypeUtils.MSSQL.equals(dbType)) {
+            MssqlQueryBatchParser.ParsedBatch parsedBatch = MssqlQueryBatchParser.parse(sql, dbName);
+            if (!parsedBatch.isValid()) {
+                return new Result<>(false, parsedBatch.getErrorMessage(), null);
+            }
+            effectiveDbName = parsedBatch.getEffectiveDbName();
+            executableSql = parsedBatch.getSqlWithoutUse();
+        }
+        String guardResult = ReadOnlySqlGuard.validate(executableSql, dbType);
         if (guardResult != null) {
             return new Result<>(false, guardResult, null);
         }
@@ -277,18 +316,29 @@ public class BaseDataServiceImpl implements BaseDataService{
                 String saveSql = maskedSql.length() > SAVE_SQL_LENGTH_LIMIT
                         ? maskedSql.substring(0, SAVE_SQL_LENGTH_LIMIT)
                         : maskedSql;
-                QueryLogBean queryLog = new QueryLogBean(userIp, user.getUserName(), dbName, serverCode, saveSql, new Date());
-                baseConfigDao.saveQueryLog(queryLog);
+                QueryLogBean queryLog = new QueryLogBean(userIp, user.getUserName(), effectiveDbName, serverCode, saveSql, new Date());
                 LOG.info(maskedSql);
                 Long startTime = System.currentTimeMillis();
-                Object[] result = operation.queryDatabaseBySql(dbName, sql, limit);
+                QueryExecutionResult executionResult = operation.queryDatabaseBySqlWithSession(
+                        effectiveDbName,
+                        executableSql,
+                        limit,
+                        sessionId -> {
+                            queryLog.setDbSessionId(sessionId);
+                            saveQueryLogCompat(queryLog);
+                        }
+                );
+                if (queryLog.getCode() == null) {
+                    saveQueryLogCompat(queryLog);
+                }
+                Object[] result = executionResult == null ? null : executionResult.getRows();
                 Integer resultRowCount = resolveResultRowCount(result);
                 String returnResult = Integer.parseInt(result[0].toString())>Integer.parseInt(result[1].toString())?
                         String.format("因程序限制只显示%s条数据",result[1].toString()):
                         "";
                 Long endTime = System.currentTimeMillis()-startTime;
                 baseConfigDao.updateQueryLogMetrics(queryLog.getCode(), endTime.intValue(), resultRowCount);
-                saveQueryTargets(queryLog.getCode(), dbName, sql);
+                saveQueryTargets(queryLog.getCode(), effectiveDbName, executableSql);
                 clearConnectionFailureState(serverCode);
                 return new Result<>(true, returnResult, result[2]);
             } catch (Exception e) {
@@ -300,6 +350,123 @@ public class BaseDataServiceImpl implements BaseDataService{
             }
         }else{
             return new Result<>(false,"没有找到对应的数据库",null);
+        }
+    }
+
+    @Override
+    public Result<WorkbenchDashboardResponse> getWorkbenchDashboard(Integer serverCode,
+                                                                   String dbName,
+                                                                   UserBean user,
+                                                                   boolean forceRefresh) {
+        evictExpiredDashboardCaches(System.currentTimeMillis());
+        Result<WorkbenchDashboardResponse> permissionCheck = validateServerPermission(serverCode, user);
+        if (permissionCheck != null) {
+            return permissionCheck;
+        }
+        if (dbName == null || dbName.trim().isEmpty()) {
+            return new Result<>(false, "请选择数据库后再查看 dashboard", null);
+        }
+
+        ConnectConfigBean connectConfigBean = DbServerTypeUtils.normalize(baseConfigDao.getConnectConfig(serverCode));
+        if (connectConfigBean == null) {
+            return new Result<>(false, "没有找到对应的数据库", null);
+        }
+
+        WorkbenchDashboardProvider provider = WorkbenchDashboardProviderFactory.getProvider(connectConfigBean.getDbServerType());
+        if (provider == null) {
+            return new Result<>(false, "当前数据库类型暂不支持 dashboard", null);
+        }
+
+        if (!forceRefresh) {
+            WorkbenchDashboardResponse cachedResponse = buildWorkbenchDashboardFromCache(serverCode, dbName, connectConfigBean);
+            if (cachedResponse != null) {
+                return new Result<>(true, "", cachedResponse);
+            }
+        }
+
+        Result<WorkbenchDashboardResponse> cooldownResult = buildCooldownResultIfPresent(serverCode);
+        if (cooldownResult != null) {
+            return cooldownResult;
+        }
+
+        DbOperation operation = createDbOperation(serverCode);
+        if (operation == null) {
+            return new Result<>(false, "没有找到对应的数据库", null);
+        }
+
+        try {
+            List<WorkbenchDashboardSection> sections = provider.buildSections(operation, dbName, connectConfigBean);
+            WorkbenchDashboardResponse response = createWorkbenchDashboardResponse(serverCode, dbName, connectConfigBean.getDbServerType(), sections);
+            cacheWorkbenchDashboard(serverCode, dbName, response);
+            clearConnectionFailureState(serverCode);
+            return new Result<>(true, "", response);
+        } catch (Exception exception) {
+            LOG.warn("Workbench dashboard load failed for server {} db {}", serverCode, dbName, exception);
+            if (isConnectionFailure(exception)) {
+                return buildConnectionFailureResult(serverCode, exception);
+            }
+            return new Result<>(false, extractExceptionMessage(exception), null);
+        }
+    }
+
+    @Override
+    public void invalidateServerResources(Integer serverCode) {
+        if (serverCode == null) {
+            return;
+        }
+        DbOperation operation = operationMap.remove(serverCode);
+        closeOperationQuietly(serverCode, operation);
+        clearConnectionFailureState(serverCode);
+        workbenchServerDashboardCache.remove(serverCode);
+        String cacheKeyPrefix = serverCode + "::";
+        workbenchDatabaseDashboardCache.forEach((key, value) -> {
+            if (key != null && key.startsWith(cacheKeyPrefix)) {
+                workbenchDatabaseDashboardCache.remove(key, value);
+            }
+        });
+    }
+
+    @Override
+    public Result<List<TargetPoolStatBean>> getTargetPoolStats() {
+        long now = System.currentTimeMillis();
+        List<ConnectConfigBean> servers = DbServerTypeUtils.normalize(baseConfigDao.getAllConnectConfig());
+        List<TargetPoolStatBean> targetPools = new ArrayList<>();
+        for (ConnectConfigBean server : servers) {
+            targetPools.add(buildTargetPoolStat(server, now));
+        }
+        targetPools.sort(Comparator.comparing(TargetPoolStatBean::getServerCode, Comparator.nullsLast(Integer::compareTo)));
+        return new Result<>(true, "", targetPools);
+    }
+
+    @Override
+    public Result<List<TargetSessionStatBean>> getTargetPoolSessions(Integer serverCode) {
+        if (serverCode == null) {
+            return new Result<>(false, "无此服务器", null);
+        }
+        ConnectConfigBean server = DbServerTypeUtils.normalize(baseConfigDao.getConnectConfig(serverCode));
+        if (server == null) {
+            return new Result<>(false, "无此服务器", null);
+        }
+        DbOperation operation = operationMap.get(serverCode);
+        if (operation == null) {
+            return new Result<>(true, "", List.of());
+        }
+        try {
+            List<TargetSessionStatBean> sessionResult = operation.listActiveSessions();
+            List<TargetSessionStatBean> sessions = sessionResult == null ? new ArrayList<>() : new ArrayList<>(sessionResult);
+            String normalizedDbType = DbServerTypeUtils.normalize(server.getDbServerType());
+            for (TargetSessionStatBean session : sessions) {
+                session.setServerCode(serverCode);
+                if (session.getDbType() == null || session.getDbType().isBlank()) {
+                    session.setDbType(normalizedDbType);
+                }
+            }
+            sessions.sort(Comparator
+                    .comparing((TargetSessionStatBean session) -> defaultLong(session == null ? null : session.getRunningSeconds()), Comparator.reverseOrder())
+                    .thenComparing((TargetSessionStatBean session) -> session == null ? null : session.getSessionId(), Comparator.nullsLast(String::compareTo)));
+            return new Result<>(true, "", sessions);
+        } catch (SQLException exception) {
+            return new Result<>(false, buildSessionDetailPermissionMessage(DbServerTypeUtils.normalize(server.getDbServerType()), exception), null);
         }
     }
 
@@ -363,7 +530,7 @@ public class BaseDataServiceImpl implements BaseDataService{
         if(null == user){
             return new Result<>(false,"",null);
         }
-        return new Result<>(true, "", baseConfigDao.getHavePermConnConfig(user.getCode()));
+        return new Result<>(true, "", DbServerTypeUtils.normalize(baseConfigDao.getHavePermConnConfig(user.getCode())));
     }
 
     /**
@@ -388,7 +555,11 @@ public class BaseDataServiceImpl implements BaseDataService{
                 if(null == operationMap.get(serverCode)){
                     ConnectConfigBean connConfigBean = baseConfigDao.getConnectConfig(serverCode);
                     try{
+                        DbServerTypeUtils.normalize(connConfigBean);
                         dbOperation = DbOperationFactory.createDbOperation(connConfigBean);
+                        if (dbOperation != null) {
+                            dbOperation.configureQueryTimeoutSeconds(targetQueryTimeoutSeconds == null ? 30 : targetQueryTimeoutSeconds);
+                        }
                         operationMap.put(serverCode,dbOperation);
                     } catch (Exception e){
                         e.printStackTrace();
@@ -409,6 +580,8 @@ public class BaseDataServiceImpl implements BaseDataService{
         connectionFailureCountMap.clear();
         connectionCooldownUntilMap.clear();
         connectionLastErrorMap.clear();
+        workbenchServerDashboardCache.clear();
+        workbenchDatabaseDashboardCache.clear();
     }
 
     private <T> Result<T> validateServerPermission(Integer serverCode, UserBean user) {
@@ -449,6 +622,24 @@ public class BaseDataServiceImpl implements BaseDataService{
         }
     }
 
+    private void saveQueryLogCompat(QueryLogBean queryLog) {
+        try {
+            baseConfigDao.saveQueryLog(queryLog);
+        } catch (Exception exception) {
+            if (!isMissingColumn(exception, DB_SESSION_ID_COLUMN)) {
+                throw exception;
+            }
+            LOG.warn("db_query_log is missing db_session_id, falling back to legacy insert");
+            String originalSessionId = queryLog.getDbSessionId();
+            try {
+                queryLog.setDbSessionId(null);
+                baseConfigDao.saveQueryLogLegacy(queryLog);
+            } finally {
+                queryLog.setDbSessionId(originalSessionId);
+            }
+        }
+    }
+
     private <T> Result<T> executeServerOperation(Integer serverCode, OperationAction<T> action) {
         Result<T> cooldownResult = buildCooldownResultIfPresent(serverCode);
         if (cooldownResult != null) {
@@ -477,6 +668,92 @@ public class BaseDataServiceImpl implements BaseDataService{
         connectionFailureCountMap.remove(serverCode);
         connectionCooldownUntilMap.remove(serverCode);
         connectionLastErrorMap.remove(serverCode);
+    }
+
+    private WorkbenchDashboardResponse buildWorkbenchDashboardFromCache(Integer serverCode,
+                                                                       String dbName,
+                                                                       ConnectConfigBean config) {
+        WorkbenchDashboardCacheEntry serverEntry = getValidDashboardCacheEntry(workbenchServerDashboardCache, serverCode);
+        WorkbenchDashboardCacheEntry databaseEntry = getValidDashboardCacheEntry(
+                workbenchDatabaseDashboardCache,
+                buildWorkbenchDatabaseCacheKey(serverCode, dbName)
+        );
+        if (serverEntry == null || databaseEntry == null) {
+            return null;
+        }
+        List<WorkbenchDashboardSection> mergedSections = new ArrayList<>(serverEntry.sections.size() + databaseEntry.sections.size());
+        mergedSections.addAll(serverEntry.sections);
+        mergedSections.addAll(databaseEntry.sections);
+        WorkbenchDashboardResponse response = createWorkbenchDashboardResponse(serverCode, dbName, config.getDbServerType(), mergedSections);
+        response.setCachedAt(Math.min(serverEntry.cachedAt, databaseEntry.cachedAt));
+        response.setExpiresAt(Math.min(serverEntry.expiresAt, databaseEntry.expiresAt));
+        return response;
+    }
+
+    private WorkbenchDashboardResponse createWorkbenchDashboardResponse(Integer serverCode,
+                                                                       String dbName,
+                                                                       String dbType,
+                                                                       List<WorkbenchDashboardSection> sections) {
+        long now = System.currentTimeMillis();
+        WorkbenchDashboardResponse response = new WorkbenchDashboardResponse();
+        response.setServerCode(serverCode);
+        response.setDbName(dbName);
+        response.setDbType(DbServerTypeUtils.normalize(dbType));
+        response.setCachedAt(now);
+        response.setExpiresAt(now + WORKBENCH_DASHBOARD_CACHE_MILLIS);
+        response.setSections(sections);
+        return response;
+    }
+
+    private void cacheWorkbenchDashboard(Integer serverCode, String dbName, WorkbenchDashboardResponse response) {
+        long now = System.currentTimeMillis();
+        long expiresAt = now + WORKBENCH_DASHBOARD_CACHE_MILLIS;
+        evictExpiredDashboardCaches(now);
+        List<WorkbenchDashboardSection> serverSections = new ArrayList<>();
+        List<WorkbenchDashboardSection> databaseSections = new ArrayList<>();
+        for (WorkbenchDashboardSection section : response.getSections()) {
+            if ("system".equals(section.getKey())) {
+                serverSections.add(section);
+            } else {
+                databaseSections.add(section);
+            }
+        }
+        workbenchServerDashboardCache.put(serverCode, new WorkbenchDashboardCacheEntry(serverSections, now, expiresAt));
+        workbenchDatabaseDashboardCache.put(
+                buildWorkbenchDatabaseCacheKey(serverCode, dbName),
+                new WorkbenchDashboardCacheEntry(databaseSections, now, expiresAt)
+        );
+        response.setCachedAt(now);
+        response.setExpiresAt(expiresAt);
+    }
+
+    private <K> WorkbenchDashboardCacheEntry getValidDashboardCacheEntry(Map<K, WorkbenchDashboardCacheEntry> cache, K key) {
+        WorkbenchDashboardCacheEntry entry = cache.get(key);
+        if (entry == null) {
+            return null;
+        }
+        if (entry.expiresAt <= System.currentTimeMillis()) {
+            cache.remove(key);
+            return null;
+        }
+        return entry;
+    }
+
+    private void evictExpiredDashboardCaches(long now) {
+        removeExpiredDashboardEntries(workbenchServerDashboardCache, now);
+        removeExpiredDashboardEntries(workbenchDatabaseDashboardCache, now);
+    }
+
+    private <K> void removeExpiredDashboardEntries(Map<K, WorkbenchDashboardCacheEntry> cache, long now) {
+        cache.forEach((key, entry) -> {
+            if (entry != null && entry.expiresAt <= now) {
+                cache.remove(key, entry);
+            }
+        });
+    }
+
+    private String buildWorkbenchDatabaseCacheKey(Integer serverCode, String dbName) {
+        return serverCode + "::" + dbName;
     }
 
     private <T> Result<T> buildCooldownResultIfPresent(Integer serverCode) {
@@ -523,6 +800,9 @@ public class BaseDataServiceImpl implements BaseDataService{
     }
 
     private boolean isConnectionFailure(Throwable throwable) {
+        if (isQueryTimeoutFailure(throwable)) {
+            return false;
+        }
         Throwable current = throwable;
         while (current != null) {
             if (current instanceof SQLTransientConnectionException
@@ -561,6 +841,23 @@ public class BaseDataServiceImpl implements BaseDataService{
         return false;
     }
 
+    private boolean isQueryTimeoutFailure(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof SQLTimeoutException) {
+                return true;
+            }
+            if (current instanceof SQLException sqlException) {
+                String sqlState = sqlException.getSQLState();
+                if ("HYT00".equalsIgnoreCase(sqlState) || "S1T00".equalsIgnoreCase(sqlState)) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private String extractExceptionMessage(Throwable throwable) {
         Throwable current = throwable;
         String message = null;
@@ -576,6 +873,22 @@ public class BaseDataServiceImpl implements BaseDataService{
         return throwable == null ? "目标数据库连接失败" : throwable.toString();
     }
 
+    private boolean isMissingColumn(Throwable throwable, String columnName) {
+        Throwable current = throwable;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("unknown column")
+                        && normalized.contains(columnName.toLowerCase(Locale.ROOT))) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private void closeOperationQuietly(Integer serverCode, DbOperation operation) {
         if (operation == null) {
             return;
@@ -585,5 +898,100 @@ public class BaseDataServiceImpl implements BaseDataService{
         } catch (Exception e) {
             LOG.warn("Failed to close cached operation for server {}", serverCode, e);
         }
+    }
+
+    private TargetPoolStatBean buildTargetPoolStat(ConnectConfigBean server, long now) {
+        TargetPoolStatBean stat = new TargetPoolStatBean();
+        if (server == null) {
+            stat.setRuntimeStatus("unused");
+            stat.setInCooldown(false);
+            stat.setCooldownRemainingSeconds(0L);
+            stat.setFailureCount(0);
+            return stat;
+        }
+
+        Integer serverCode = server.getCode();
+        Integer failureCount = serverCode == null ? 0 : connectionFailureCountMap.getOrDefault(serverCode, 0);
+        String lastError = serverCode == null ? null : connectionLastErrorMap.get(serverCode);
+        Long cooldownUntilMillis = serverCode == null ? null : connectionCooldownUntilMap.get(serverCode);
+        if (cooldownUntilMillis != null && cooldownUntilMillis <= now && serverCode != null) {
+            clearConnectionFailureState(serverCode);
+            cooldownUntilMillis = null;
+            failureCount = 0;
+            lastError = null;
+        }
+
+        DbOperation operation = serverCode == null ? null : operationMap.get(serverCode);
+        PoolStatBean poolStat = operation == null ? null : operation.describeRuntimePool();
+        boolean inCooldown = cooldownUntilMillis != null && cooldownUntilMillis > now;
+        long cooldownRemainingSeconds = inCooldown ? Math.max(1L, (cooldownUntilMillis - now + 999L) / 1000L) : 0L;
+
+        stat.setServerCode(serverCode);
+        stat.setServerName(server.getDbServerName());
+        stat.setDbType(DbServerTypeUtils.normalize(server.getDbServerType()));
+        stat.setPoolName(poolStat == null ? null : poolStat.getPoolName());
+        stat.setActiveConnections(poolStat == null ? null : poolStat.getActiveConnections());
+        stat.setIdleConnections(poolStat == null ? null : poolStat.getIdleConnections());
+        stat.setTotalConnections(poolStat == null ? null : poolStat.getTotalConnections());
+        stat.setThreadsAwaitingConnection(poolStat == null ? null : poolStat.getThreadsAwaitingConnection());
+        stat.setFailureCount(failureCount);
+        stat.setInCooldown(inCooldown);
+        stat.setCooldownRemainingSeconds(cooldownRemainingSeconds);
+        stat.setLastError(lastError);
+        stat.setRuntimeStatus(resolveRuntimeStatus(stat, operation));
+        return stat;
+    }
+
+    private String resolveRuntimeStatus(TargetPoolStatBean stat, DbOperation operation) {
+        if (Boolean.TRUE.equals(stat.getInCooldown())) {
+            return "cooldown";
+        }
+        if (isWarningPoolStat(stat)) {
+            return "warning";
+        }
+        if (hasRuntimePoolSnapshot(stat)) {
+            return "ok";
+        }
+        return "unused";
+    }
+
+    private boolean hasRuntimePoolSnapshot(TargetPoolStatBean stat) {
+        if (stat == null) {
+            return false;
+        }
+        if (stat.getPoolName() != null && !stat.getPoolName().isBlank()) {
+            return true;
+        }
+        return stat.getActiveConnections() != null
+                || stat.getIdleConnections() != null
+                || stat.getTotalConnections() != null
+                || stat.getThreadsAwaitingConnection() != null;
+    }
+
+    private boolean isWarningPoolStat(TargetPoolStatBean stat) {
+        if (stat == null) {
+            return false;
+        }
+        return (stat.getFailureCount() != null && stat.getFailureCount() > 0)
+                || (stat.getThreadsAwaitingConnection() != null && stat.getThreadsAwaitingConnection() > 0)
+                || (stat.getLastError() != null && !stat.getLastError().isBlank());
+    }
+
+    private String buildSessionDetailPermissionMessage(String dbType, SQLException exception) {
+        String baseMessage = extractExceptionMessage(exception);
+        if (DbServerTypeUtils.MYSQL.equals(dbType) || DbServerTypeUtils.MARIADB.equals(dbType)) {
+            return String.format("读取 MySQL 会话明细失败，请确认目标库账号具备 PROCESS 或等价可见 processlist 权限。原始错误：%s", baseMessage);
+        }
+        if (DbServerTypeUtils.POSTGRESQL.equals(dbType)) {
+            return String.format("读取 PostgreSQL 会话明细失败，请确认目标库账号具备查看完整 pg_stat_activity 的统计权限。原始错误：%s", baseMessage);
+        }
+        if (DbServerTypeUtils.MSSQL.equals(dbType)) {
+            return String.format("读取 SQL Server 会话明细失败，请确认目标库账号具备 VIEW SERVER STATE 权限。原始错误：%s", baseMessage);
+        }
+        return baseMessage;
+    }
+
+    private long defaultLong(Long value) {
+        return value == null ? 0L : value;
     }
 }

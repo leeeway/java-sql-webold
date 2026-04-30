@@ -66,6 +66,25 @@ public interface BaseConfigDao {
             "`query_name`,\n" +
             "`query_database`,\n" +
             "`server_code`,\n" +
+            "`db_session_id`,\n" +
+            "`query_sqlscript`,\n" +
+            "`query_time`)\n" +
+            "VALUES\n" +
+            "(#{queryIp},\n" +
+            "#{queryName},\n" +
+            "#{queryDatabase},\n" +
+            "#{serverCode},\n" +
+            "#{dbSessionId},\n" +
+            "#{querySqlscript},\n" +
+            "#{queryTime});")
+    @Options(useGeneratedKeys = true, keyProperty = "code", keyColumn = "code")
+    Boolean saveQueryLog(QueryLogBean queryLog);
+
+    @Insert("INSERT INTO `db_query_log`\n" +
+            "(`query_ip`,\n" +
+            "`query_name`,\n" +
+            "`query_database`,\n" +
+            "`server_code`,\n" +
             "`query_sqlscript`,\n" +
             "`query_time`)\n" +
             "VALUES\n" +
@@ -76,7 +95,7 @@ public interface BaseConfigDao {
             "#{querySqlscript},\n" +
             "#{queryTime});")
     @Options(useGeneratedKeys = true, keyProperty = "code", keyColumn = "code")
-    Boolean saveQueryLog(QueryLogBean queryLog);
+    Boolean saveQueryLogLegacy(QueryLogBean queryLog);
 
     /**
      * 更新处理统计
@@ -132,6 +151,21 @@ public interface BaseConfigDao {
     @Select("SELECT EXISTS(SELECT 1 FROM db_query_log WHERE code > #{code})")
     Boolean existsNewerQueryLog(@Param("code") Integer code);
 
+    @Select("<script>" +
+            "SELECT * FROM db_query_log " +
+            "WHERE server_code = #{serverCode} " +
+            "AND db_session_id IN " +
+            "<foreach collection='sessionIds' item='sessionId' open='(' separator=',' close=')'>" +
+            "#{sessionId}" +
+            "</foreach> " +
+            "ORDER BY code DESC" +
+            "</script>")
+    List<QueryLogBean> getQueryLogsByServerAndSessionIds(@Param("serverCode") Integer serverCode,
+                                                         @Param("sessionIds") List<String> sessionIds);
+
+    @Select("SELECT 1")
+    Integer selectOne();
+
     /**
      * 获取所有的连接配置
      * @return
@@ -141,6 +175,31 @@ public interface BaseConfigDao {
             ",`db_group` "+
             "FROM `db_connect_config_tb`;")
     List<ConnectConfigBean> getConnData();
+
+    /**
+     * 获取用于后台同步任务的完整连接配置（含密码）
+     * @return
+     */
+    @Select("SELECT * FROM `db_connect_config_tb`;")
+    List<ConnectConfigBean> getConnDataForSync();
+
+    @Delete("DELETE FROM db_server_database_snapshot_tb WHERE server_code = #{serverCode}")
+    Boolean deleteServerDatabaseSnapshots(@Param("serverCode") Integer serverCode);
+
+    @Insert("<script>" +
+            "INSERT INTO db_server_database_snapshot_tb (server_code, database_name, synced_at) VALUES " +
+            "<foreach collection='databaseNames' item='databaseName' separator=','>" +
+            "(#{serverCode}, #{databaseName}, NOW())" +
+            "</foreach>" +
+            "</script>")
+    Boolean addServerDatabaseSnapshots(@Param("serverCode") Integer serverCode,
+                                       @Param("databaseNames") List<String> databaseNames);
+
+    @Select("SELECT DISTINCT server_code FROM db_server_database_snapshot_tb WHERE database_name = #{dbName}")
+    List<Integer> getServerCodesByDatabaseName(@Param("dbName") String dbName);
+
+    @Select("SELECT DATE_FORMAT(MAX(synced_at), '%Y-%m-%d %H:%i:%s') FROM db_server_database_snapshot_tb")
+    String getLatestServerDatabaseSnapshotTime();
 
     /**
      * 获得指定name的连接属性

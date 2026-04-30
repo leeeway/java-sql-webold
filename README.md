@@ -68,6 +68,13 @@ cp .env.example .env
 - `DB_PASSWORD`：MariaDB root 密码
 - `PUBLIC_DOMAIN` / `PUBLIC_HOST`：对外访问域名与完整 URL
 
+建议配置示例：
+
+```shell
+PUBLIC_DOMAIN=jsw.example.com
+PUBLIC_HOST=https://jsw.example.com
+```
+
 启动服务：
 
 ```shell
@@ -117,6 +124,14 @@ cp deploy/k8s/env/prod.env.example deploy/k8s/env/prod.env
 - `PUBLIC_HOST`
 - `INGRESS_HOST`
 - `DB_STORAGE_CLASS`（如果集群没有默认 StorageClass）
+
+建议配置示例：
+
+```shell
+PUBLIC_DOMAIN=jsw.example.com
+PUBLIC_HOST=https://jsw.example.com
+INGRESS_HOST=jsw.example.com
+```
 
 部署：
 
@@ -190,38 +205,119 @@ JAVA_TOOL_OPTIONS="-Djdk.tls.client.protocols=TLSv1,TLSv1.1,TLSv1.2 -Djava.secur
 java -jar /opt/jsw/program.jar
 ```
 
-## 部署到 OpenClaw
+## SkillHub Skills Registry
 
-仓库内置了一个给 OpenClaw 使用的查询 skill：
+仓库内置了一个可发布到 SkillHub 的查询 skill：
 
-- `skills/java-sql-web-query/`
+- `skills/jsw-db-query/`
 
-推荐用一键安装脚本把它安装到全局 `~/.openclaw/skills/`：
+SkillHub 提供了 ClawHub 兼容接口，推荐统一使用 `clawhub` CLI，而不是继续走 GitHub tar 包拷贝。
 
-```shell
-curl -fsSL https://raw.githubusercontent.com/guohai163/java-sql-web/v2.1.1/scripts/install-openclaw-skill.sh | VERSION=v2.1.1 bash
-```
+### 1. 配置 Registry
 
-也可以先下载后执行：
+先把 `clawhub` 指向 SkillHub：
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/guohai163/java-sql-web/v2.1.1/scripts/install-openclaw-skill.sh -o install-openclaw-skill.sh
-bash install-openclaw-skill.sh v2.1.1
+export CLAWHUB_REGISTRY=https://skills.gydev.cn
 ```
 
-如果 OpenClaw 实际运行时使用的 home 目录和你当前 shell 的 `$HOME` 不一致，可以显式指定：
+也可以每次调用都显式传参：
 
 ```shell
-OPENCLAW_HOME=/actual/openclaw/home bash install-openclaw-skill.sh v2.1.1
+npx clawhub search "" --registry https://skills.gydev.cn
 ```
 
-安装脚本只负责把 Skill 文件复制到 `OPENCLAW_HOME/skills/`，还需要在 `OPENCLAW_HOME/openclaw.json` 里启用并注入运行时变量：
+可选的本地联通性检查：
+
+```shell
+curl https://skills.gydev.cn/.well-known/clawhub.json
+```
+
+预期返回：
+
+```json
+{"apiBase":"/api/v1"}
+```
+
+### 2. Skill 坐标规则
+
+当前这个 skill 在 `clawhub` 兼容层的推荐 slug 是：
+
+```text
+jsw-db-query
+```
+
+对应 SkillHub 坐标可理解为：
+
+```text
+@global/jsw-db-query
+```
+
+如果未来发布到团队命名空间，则需要使用：
+
+```text
+team-name--skill-slug
+```
+
+注意：
+
+- 不带 `--` 时，默认视为 `@global/...`
+- `latest` 始终表示最新已发布版本
+
+### 3. 安装 Skill
+
+直接安装最新已发布版本：
+
+```shell
+export CLAWHUB_REGISTRY=https://skills.gydev.cn
+npx clawhub install jsw-db-query
+```
+
+安装指定版本：
+
+```shell
+npx clawhub install jsw-db-query@2.7.3
+```
+
+仓库也提供了一个便捷脚本：
+
+```shell
+bash scripts/install-openclaw-skill.sh
+bash scripts/install-openclaw-skill.sh 2.7.3
+```
+
+如果该 skill 后续切到团队命名空间或非公开可见性，需要先登录：
+
+```shell
+npx clawhub login --token sk_your_api_token_here --registry https://skills.gydev.cn
+```
+
+### 4. 发布 Skill
+
+发布当前仓库内的 skill 包：
+
+```shell
+export CLAWHUB_REGISTRY=https://skills.gydev.cn
+npx clawhub publish ./skills/jsw-db-query
+```
+
+也可以用仓库脚本：
+
+```shell
+bash scripts/publish-skillhub-skill.sh
+```
+
+发布需要认证和对应命名空间权限。
+
+### 5. OpenClaw 运行时配置
+
+安装完 skill 后，还需要在 `~/.openclaw/openclaw.json` 里启用并注入运行时变量：
 
 ```json
 {
   "skills": {
     "entries": {
-      "java-sql-web-query": {
+      "jsw-db-query": {
         "enabled": true,
         "env": {
           "JSW_BASE_URL": "https://your-jsw.example.com",
@@ -236,16 +332,16 @@ OPENCLAW_HOME=/actual/openclaw/home bash install-openclaw-skill.sh v2.1.1
 配置完成后，刷新或重启 OpenClaw 的 skills 加载，然后可通过：
 
 ```text
-$java-sql-web-query
+$jsw-db-query
 ```
 
 显式调用该 skill。
 
-提示：不要只靠“你有什么 skill”这类泛化提问来验证安装结果，模型的自述不一定会实时枚举新装 skill。最稳妥的验证方式是直接显式调用 `$java-sql-web-query`。
+提示：不要只靠“你有什么 skill”这类泛化提问来验证安装结果，模型的自述不一定会实时枚举新装 skill。最稳妥的验证方式是直接显式调用 `$jsw-db-query`。
 
 ### 系统使用
 
-1. 使用浏览器打开上一步容器安装的机器IP。默认用户名密码为admin/admin。点击登录  
+1. 使用浏览器打开上一步容器安装的机器IP。首次启动时，如果库里还没有 `admin` 用户，`server` 会自动创建一个管理员账号，并把随机密码打印到控制台日志里。可通过 `docker logs` 查看该密码，然后使用 `admin` 登录。  
 ![login](./doc/pic/web-login.png)
 2. 为了保证系统的安全，首次登录我们需要绑定OTP动态码，可以点击下载安卓或iOS版本客户端。安装好后扫码即可得到6位的动态码。之后每次登录都要求输入该6位动态码。因我们使用HTOP算法来进行安全验证，请控制服务器的时间误差在30秒内，否则可能会提示动态码错误  
 ![otp-ui](./doc/pic/bind-otp.png)  

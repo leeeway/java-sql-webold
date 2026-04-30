@@ -10,6 +10,7 @@ import org.guohai.javasqlweb.dao.UserManageDao;
 import org.guohai.javasqlweb.service.operation.DbOperation;
 import org.guohai.javasqlweb.service.operation.DbOperationFactory;
 import org.guohai.javasqlweb.util.AccessTokenUtils;
+import org.guohai.javasqlweb.util.DbServerTypeUtils;
 import org.guohai.javasqlweb.util.DashboardRangeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,9 +24,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 后台服务
@@ -36,6 +39,7 @@ import java.util.Map;
 public class BackstageServiceImpl implements BackstageService{
 
     private static final String LEGACY_TLS_MODE = "LEGACY_TLS";
+    private static final String DB_SESSION_ID_COLUMN = "db_session_id";
     private static final String QUERY_LOG_DIRECTION_NEWER = "newer";
     private static final String QUERY_LOG_DIRECTION_OLDER = "older";
     private static final int QUERY_LOG_DEFAULT_PAGE_SIZE = 25;
@@ -57,6 +61,9 @@ public class BackstageServiceImpl implements BackstageService{
 
     @Autowired
     UserSecurityTaskService userSecurityTaskService;
+
+    @Autowired
+    BaseDataService baseDataService;
 
     @org.springframework.beans.factory.annotation.Value("${project.legacy-tls-enabled:false}")
     private boolean legacyTlsEnabled;
@@ -110,9 +117,73 @@ public class BackstageServiceImpl implements BackstageService{
      */
     @Override
     public Result<List<ConnectConfigBean>> getConnData() {
-        List<ConnectConfigBean> listConn = baseConfigDao.getConnData();
+        return getConnData(null, null, null);
+    }
 
-        return new Result<>(true, "", listConn);
+    @Override
+    public Result<List<ConnectConfigBean>> getConnData(String keyword, String serverType, String dbName) {
+        List<ConnectConfigBean> listConn = DbServerTypeUtils.normalize(baseConfigDao.getConnData());
+        String normalizedKeyword = normalizeKeyword(keyword);
+        String normalizedType = normalizeKeyword(serverType);
+        String normalizedDbName = normalizeKeyword(dbName);
+        final Set<Integer> dbNameMatchedServerCodes = normalizedDbName.isEmpty()
+                ? Collections.emptySet()
+                : new LinkedHashSet<>(baseConfigDao.getServerCodesByDatabaseName(normalizedDbName));
+
+        List<ConnectConfigBean> filteredList = listConn.stream()
+                .filter(server -> matchServerType(server, normalizedType))
+                .filter(server -> matchServerByKeywordOrDatabase(server, normalizedKeyword, dbNameMatchedServerCodes))
+                .toList();
+
+        return new Result<>(true, "", filteredList);
+    }
+
+    @Override
+    public Result<ServerDatabaseSyncResult> syncServerDatabases() {
+        List<ConnectConfigBean> listConn = DbServerTypeUtils.normalize(baseConfigDao.getConnDataForSync());
+        ServerDatabaseSyncResult syncResult = new ServerDatabaseSyncResult();
+        List<ServerDatabaseSyncFailure> failures = new ArrayList<>();
+        int successCount = 0;
+
+        for (ConnectConfigBean server : listConn) {
+            DbOperation operation = null;
+            Integer serverCode = server == null ? null : server.getCode();
+            try {
+                operation = createTemporaryDbOperation(server);
+                List<DatabaseNameBean> dbList = operation.getDbList();
+                baseConfigDao.deleteServerDatabaseSnapshots(serverCode);
+
+                Set<String> databaseNames = new LinkedHashSet<>();
+                for (DatabaseNameBean db : dbList) {
+                    String databaseName = db == null ? null : db.getDbName();
+                    if (databaseName == null || databaseName.trim().isEmpty()) {
+                        continue;
+                    }
+                    databaseNames.add(databaseName.trim());
+                }
+
+                if (!databaseNames.isEmpty()) {
+                    baseConfigDao.addServerDatabaseSnapshots(serverCode, new ArrayList<>(databaseNames));
+                }
+                successCount++;
+            } catch (Exception e) {
+                ServerDatabaseSyncFailure failure = new ServerDatabaseSyncFailure();
+                failure.setServerCode(serverCode);
+                failure.setServerName(server == null ? "" : server.getDbServerName());
+                failure.setMessage(resolveSyncErrorMessage(e));
+                failures.add(failure);
+                LOG.warn("Sync server databases failed, serverCode={}, serverName={}", serverCode, server == null ? "" : server.getDbServerName(), e);
+            } finally {
+                closeOperationQuietly(serverCode, operation);
+            }
+        }
+
+        syncResult.setTotalServers(listConn.size());
+        syncResult.setSuccessCount(successCount);
+        syncResult.setFailCount(failures.size());
+        syncResult.setFailures(failures);
+        syncResult.setSyncedAt(baseConfigDao.getLatestServerDatabaseSnapshotTime());
+        return new Result<>(true, "", syncResult);
     }
 
     @Override
@@ -138,6 +209,25 @@ public class BackstageServiceImpl implements BackstageService{
         return new Result<>(true, "", Collections.singletonList(bean));
     }
 
+    @Override
+    public Result<List<TargetPoolStatBean>> getTargetPoolStats() {
+        return baseDataService.getTargetPoolStats();
+    }
+
+    @Override
+    public Result<List<TargetSessionStatBean>> getTargetPoolSessions(Integer code) {
+        if (code == null || baseConfigDao.getConnectConfig(code) == null) {
+            return new Result<>(false, "无此服务器", null);
+        }
+        Result<List<TargetSessionStatBean>> sessionResult = baseDataService.getTargetPoolSessions(code);
+        if (!sessionResult.getStatus() || sessionResult.getData() == null) {
+            return sessionResult;
+        }
+        List<TargetSessionStatBean> sessions = new ArrayList<>(sessionResult.getData());
+        enrichPlatformUserNames(code, sessions);
+        return new Result<>(true, "", sessions);
+    }
+
     /**
      * 测试数据库连接性
      *
@@ -146,6 +236,7 @@ public class BackstageServiceImpl implements BackstageService{
      */
     @Override
     public Result<String> testServerConnect(ConnectConfigBean server) {
+        DbServerTypeUtils.normalize(server);
         if ("mssql".equalsIgnoreCase(server.getDbServerType())
                 && LEGACY_TLS_MODE.equalsIgnoreCase(server.getDbSslMode())
                 && !legacyTlsEnabled) {
@@ -178,6 +269,15 @@ public class BackstageServiceImpl implements BackstageService{
         return new Result<>(true,"连接成功","");
     }
 
+    @Override
+    public Result<String> testSavedServerConnect(Integer code) {
+        ConnectConfigBean savedServer = DbServerTypeUtils.normalize(baseConfigDao.getConnectConfig(code));
+        if (savedServer == null) {
+            return new Result<>(false, "服务器不存在", "服务器不存在");
+        }
+        return testServerConnect(savedServer);
+    }
+
     /**
      * 增加服务器
      *
@@ -186,10 +286,14 @@ public class BackstageServiceImpl implements BackstageService{
      */
     @Override
     public Result<String> addConnServer(ConnectConfigBean server) {
+        DbServerTypeUtils.normalize(server);
         if(null != baseConfigDao.getConnectConfigByName(server.getDbServerName())){
             return new Result<>(false,"","同名服务器已经存在");
         }
         baseConfigDao.addConnServer(server);
+        if (server.getCode() != null) {
+            baseDataService.invalidateServerResources(server.getCode());
+        }
         return new Result<>(true, "","服务器增加成功");
     }
 
@@ -220,11 +324,14 @@ public class BackstageServiceImpl implements BackstageService{
 
         PoolStatBean pool = buildPoolSummary();
         response.setPool(pool);
+        List<TargetPoolStatBean> dynamicTargetPools = resolveDynamicTargetPools();
+        response.setDynamicTargetPools(dynamicTargetPools);
 
         DashboardSummary summary = buildDashboardSummary(
                 resolvedRange.getStartTime(),
                 resolvedRange.getEndTime(),
-                pool
+                pool,
+                dynamicTargetPools
         );
         response.setSummary(summary);
         response.setTrend(dashboardDao.getTrend(
@@ -310,7 +417,17 @@ public class BackstageServiceImpl implements BackstageService{
             return new Result<>(false, "","无此服务器" ) ;
         }
         baseConfigDao.delServerByCode(code);
+        baseDataService.invalidateServerResources(code);
         return new Result<>(true, "","删除成功");
+    }
+
+    @Override
+    public Result<String> resetServer(Integer code) {
+        if (code == null || baseConfigDao.getConnectConfig(code) == null) {
+            return new Result<>(false, "", "无此服务器");
+        }
+        baseDataService.invalidateServerResources(code);
+        return new Result<>(true, "", "已重置目标库连接池并清除冷却状态");
     }
 
     /**
@@ -355,10 +472,12 @@ public class BackstageServiceImpl implements BackstageService{
      */
     @Override
     public Result<String> updateServerData(ConnectConfigBean server) {
+        DbServerTypeUtils.normalize(server);
         if(null == baseConfigDao.getConnectConfigByCode(server.getCode())){
             return new Result<>(false, "","服务器不存在" );
         }
         baseConfigDao.updateConnServer(server);
+        baseDataService.invalidateServerResources(server.getCode());
         return new Result<>(true, "","修改成功");
     }
 
@@ -395,7 +514,8 @@ public class BackstageServiceImpl implements BackstageService{
 
     private DashboardSummary buildDashboardSummary(java.util.Date startTime,
                                                    java.util.Date endTime,
-                                                   PoolStatBean pool) {
+                                                   PoolStatBean pool,
+                                                   List<TargetPoolStatBean> dynamicTargetPools) {
         DashboardSummary summary = dashboardDao.getUserSummary(startTime, endTime);
         if (summary == null) {
             summary = new DashboardSummary();
@@ -406,6 +526,10 @@ public class BackstageServiceImpl implements BackstageService{
         summary.setIdlePoolConnections(defaultInteger(pool.getIdleConnections()));
         summary.setTotalPoolConnections(defaultInteger(pool.getTotalConnections()));
         summary.setWaitingPoolThreads(defaultInteger(pool.getThreadsAwaitingConnection()));
+        summary.setActiveDynamicPools(countActiveDynamicPools(dynamicTargetPools));
+        summary.setCooldownDynamicPools(countCooldownDynamicPools(dynamicTargetPools));
+        summary.setDynamicPoolConnections(sumDynamicPoolConnections(dynamicTargetPools));
+        summary.setDynamicPoolWaitingThreads(sumDynamicPoolWaitingThreads(dynamicTargetPools));
         summary.setQueryCount(defaultLong(dashboardDao.countQueries(startTime, endTime)));
         summary.setTotalReturnedRows(defaultLong(dashboardDao.sumResultRows(startTime, endTime)));
         summary.setAverageQueryConsuming(defaultDouble(dashboardDao.avgQueryConsuming(startTime, endTime)));
@@ -419,6 +543,122 @@ public class BackstageServiceImpl implements BackstageService{
             return "DATE_FORMAT(query_time, '%Y-%m-%d')";
         }
         return "DATE_FORMAT(query_time, '%Y-%m-%d %H:00')";
+    }
+
+    private List<TargetPoolStatBean> resolveDynamicTargetPools() {
+        Result<List<TargetPoolStatBean>> runtimeResult = baseDataService.getTargetPoolStats();
+        if (!runtimeResult.getStatus() || runtimeResult.getData() == null) {
+            return Collections.emptyList();
+        }
+        List<TargetPoolStatBean> filtered = new ArrayList<>();
+        for (TargetPoolStatBean stat : runtimeResult.getData()) {
+            if (stat == null || "unused".equals(stat.getRuntimeStatus())) {
+                continue;
+            }
+            filtered.add(stat);
+        }
+        filtered.sort(Comparator
+                .comparing((TargetPoolStatBean stat) -> !Boolean.TRUE.equals(stat.getInCooldown()))
+                .thenComparing((TargetPoolStatBean stat) -> defaultInteger(stat.getThreadsAwaitingConnection()), Comparator.reverseOrder())
+                .thenComparing((TargetPoolStatBean stat) -> defaultInteger(stat.getActiveConnections()), Comparator.reverseOrder())
+                .thenComparing((TargetPoolStatBean stat) -> defaultInteger(stat.getServerCode())));
+        return filtered;
+    }
+
+    private Integer countActiveDynamicPools(List<TargetPoolStatBean> stats) {
+        int count = 0;
+        for (TargetPoolStatBean stat : stats) {
+            if (stat != null && !"unused".equals(stat.getRuntimeStatus())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private Integer countCooldownDynamicPools(List<TargetPoolStatBean> stats) {
+        int count = 0;
+        for (TargetPoolStatBean stat : stats) {
+            if (stat != null && Boolean.TRUE.equals(stat.getInCooldown())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private Integer sumDynamicPoolConnections(List<TargetPoolStatBean> stats) {
+        int total = 0;
+        for (TargetPoolStatBean stat : stats) {
+            total += defaultInteger(stat == null ? null : stat.getTotalConnections());
+        }
+        return total;
+    }
+
+    private Integer sumDynamicPoolWaitingThreads(List<TargetPoolStatBean> stats) {
+        int total = 0;
+        for (TargetPoolStatBean stat : stats) {
+            total += defaultInteger(stat == null ? null : stat.getThreadsAwaitingConnection());
+        }
+        return total;
+    }
+
+    private void enrichPlatformUserNames(Integer serverCode, List<TargetSessionStatBean> sessions) {
+        List<String> sessionIds = new ArrayList<>();
+        for (TargetSessionStatBean session : sessions) {
+            if (session != null && session.getSessionId() != null && !session.getSessionId().isBlank()) {
+                sessionIds.add(session.getSessionId());
+            }
+        }
+        if (sessionIds.isEmpty()) {
+            return;
+        }
+        List<QueryLogBean> queryLogs;
+        try {
+            queryLogs = baseConfigDao.getQueryLogsByServerAndSessionIds(serverCode, sessionIds);
+        } catch (Exception exception) {
+            if (isMissingColumn(exception, DB_SESSION_ID_COLUMN)) {
+                LOG.warn("db_query_log is missing db_session_id, skip platform user enrichment for server {}", serverCode);
+                return;
+            }
+            throw exception;
+        }
+        Map<String, QueryLogBean> latestInFlightBySession = new LinkedHashMap<>();
+        for (QueryLogBean queryLog : queryLogs) {
+            if (queryLog == null || queryLog.getDbSessionId() == null || queryLog.getDbSessionId().isBlank()) {
+                continue;
+            }
+            if (queryLog.getQueryConsuming() != null) {
+                continue;
+            }
+            latestInFlightBySession.putIfAbsent(queryLog.getDbSessionId(), queryLog);
+        }
+        for (TargetSessionStatBean session : sessions) {
+            QueryLogBean queryLog = session == null ? null : latestInFlightBySession.get(session.getSessionId());
+            if (queryLog == null) {
+                session.setPlatformUserName(null);
+                session.setQueryLogCode(null);
+                session.setMatchedByPlatformTrace(false);
+                continue;
+            }
+            session.setPlatformUserName(queryLog.getQueryName());
+            session.setQueryLogCode(queryLog.getCode());
+            session.setMatchedByPlatformTrace(true);
+        }
+    }
+
+    private boolean isMissingColumn(Throwable throwable, String columnName) {
+        Throwable current = throwable;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(java.util.Locale.ROOT);
+                if (normalized.contains("unknown column")
+                        && normalized.contains(columnName.toLowerCase(java.util.Locale.ROOT))) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private Integer normalizeLimit(Integer value, int defaultValue) {
@@ -488,6 +728,54 @@ public class BackstageServiceImpl implements BackstageService{
 
     private boolean hasExistingNewerQueryLog(Integer code) {
         return code != null && Boolean.TRUE.equals(baseConfigDao.existsNewerQueryLog(code));
+    }
+
+    private String normalizeKeyword(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private boolean matchServerType(ConnectConfigBean server, String normalizedType) {
+        if (normalizedType == null || normalizedType.isEmpty() || "all".equalsIgnoreCase(normalizedType)) {
+            return true;
+        }
+        String serverType = server == null ? null : server.getDbServerType();
+        return serverType != null && serverType.equalsIgnoreCase(normalizedType);
+    }
+
+    private boolean matchServerByKeywordOrDatabase(ConnectConfigBean server,
+                                                   String normalizedKeyword,
+                                                   Set<Integer> dbNameMatchedServerCodes) {
+        if (normalizedKeyword == null || normalizedKeyword.isEmpty()) {
+            return true;
+        }
+
+        String serverName = server == null ? "" : String.valueOf(server.getDbServerName());
+        boolean matchServerName = serverName.toLowerCase().contains(normalizedKeyword.toLowerCase());
+        boolean matchDbName = server != null
+                && server.getCode() != null
+                && dbNameMatchedServerCodes != null
+                && dbNameMatchedServerCodes.contains(server.getCode());
+
+        return matchServerName || matchDbName;
+    }
+
+    private String resolveSyncErrorMessage(Exception error) {
+        Throwable current = error;
+        String lastNonEmptyMessage = null;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && !message.trim().isEmpty()) {
+                lastNonEmptyMessage = message.trim();
+            }
+            current = current.getCause();
+        }
+        if (lastNonEmptyMessage != null) {
+            return lastNonEmptyMessage;
+        }
+        if (error == null || error.getMessage() == null || error.getMessage().trim().isEmpty()) {
+            return "同步失败";
+        }
+        return error.getMessage().trim();
     }
 
     DbOperation createTemporaryDbOperation(ConnectConfigBean server) throws Exception {

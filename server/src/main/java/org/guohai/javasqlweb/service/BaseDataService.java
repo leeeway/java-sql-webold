@@ -120,6 +120,38 @@ public interface BaseDataService {
     Result<Object> quereyDataBySql(Integer serverCode, String dbName, String sql, UserBean user, String userIp);
 
     /**
+     * 获取工作台 dashboard
+     * @param serverCode 服务器编号
+     * @param dbName 数据库名
+     * @param user 已认证用户
+     * @param forceRefresh 是否强制刷新
+     * @return dashboard 数据
+     */
+    Result<WorkbenchDashboardResponse> getWorkbenchDashboard(Integer serverCode,
+                                                            String dbName,
+                                                            UserBean user,
+                                                            boolean forceRefresh);
+
+    /**
+     * 使指定服务器的内存缓存和动态连接资源失效
+     * @param serverCode 服务器编号
+     */
+    void invalidateServerResources(Integer serverCode);
+
+    /**
+     * 获取动态目标库连接池运行时快照
+     * @return
+     */
+    Result<List<TargetPoolStatBean>> getTargetPoolStats();
+
+    /**
+     * 获取指定目标库动态连接池对应的活动会话明细
+     * @param serverCode 服务器编号
+     * @return 活动会话列表
+     */
+    Result<List<TargetSessionStatBean>> getTargetPoolSessions(Integer serverCode);
+
+    /**
      * 检查所有服务器的健康状态
      * @return
      */

@@ -16,22 +16,95 @@ public final class ReadOnlySqlGuard {
 
     public static String validate(String sql, String dbType) {
         for (String statement : splitStatements(sql)) {
-            String normalized = stripStringsAndComments(statement);
-            String trimmed = normalized.trim();
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-            if (isAllowedVariableStatement(trimmed, dbType)) {
-                continue;
-            }
+            for (String candidate : expandMssqlVariableAndReadOnlyBatch(statement, dbType)) {
+                String candidateTrimmed = candidate == null ? "" : candidate.trim();
+                if (candidateTrimmed.isEmpty()) {
+                    continue;
+                }
+                if (isAllowedVariableStatement(candidateTrimmed, dbType)) {
+                    continue;
+                }
 
-            String firstKeyword = extractFirstKeyword(trimmed);
-            if (isAllowedReadOnlyStatement(trimmed, firstKeyword)) {
-                continue;
+                String normalized = stripStringsAndComments(candidate);
+                String trimmed = normalized.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+
+                String firstKeyword = extractFirstKeyword(trimmed);
+                if (isAllowedReadOnlyStatement(trimmed, firstKeyword)) {
+                    continue;
+                }
+                return READ_ONLY_ERROR;
             }
-            return READ_ONLY_ERROR;
         }
         return null;
+    }
+
+    private static List<String> expandMssqlVariableAndReadOnlyBatch(String statement, String dbType) {
+        List<String> statements = new ArrayList<>();
+        statements.add(statement);
+        if (!"mssql".equalsIgnoreCase(dbType)) {
+            return statements;
+        }
+        String sanitized = stripStringsAndComments(statement);
+        String trimmed = sanitized.trim();
+        if (trimmed.isEmpty()) {
+            return statements;
+        }
+        String firstKeyword = extractFirstKeyword(trimmed);
+        if (!"DECLARE".equals(firstKeyword) && !"SET".equals(firstKeyword)) {
+            return statements;
+        }
+
+        int splitIndex = findTopLevelSelectOrWithIndex(sanitized);
+        if (splitIndex <= 0 || splitIndex >= statement.length()) {
+            return statements;
+        }
+        String variableStatement = statement.substring(0, splitIndex).trim();
+        String readOnlyStatement = statement.substring(splitIndex).trim();
+        if (variableStatement.isEmpty() || readOnlyStatement.isEmpty()) {
+            return statements;
+        }
+        statements.clear();
+        statements.add(variableStatement);
+        statements.add(readOnlyStatement);
+        return statements;
+    }
+
+    private static int findTopLevelSelectOrWithIndex(String sql) {
+        int depth = 0;
+        boolean seenKeyword = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char currentChar = sql.charAt(i);
+            if (currentChar == '(') {
+                depth++;
+                continue;
+            }
+            if (currentChar == ')') {
+                if (depth > 0) {
+                    depth--;
+                }
+                continue;
+            }
+            if (depth != 0 || !Character.isLetter(currentChar)) {
+                continue;
+            }
+            int start = i;
+            while (i < sql.length() && (Character.isLetter(sql.charAt(i)) || sql.charAt(i) == '_')) {
+                i++;
+            }
+            String keyword = sql.substring(start, i).toUpperCase(Locale.ROOT);
+            if (!seenKeyword) {
+                seenKeyword = true;
+                continue;
+            }
+            if ("SELECT".equals(keyword) || "WITH".equals(keyword)) {
+                return start;
+            }
+            i--;
+        }
+        return -1;
     }
 
     static List<String> splitStatements(String sql) {
@@ -139,14 +212,126 @@ public final class ReadOnlySqlGuard {
     private static boolean isAllowedVariableStatement(String sql, String dbType) {
         String upperDbType = dbType == null ? "" : dbType.toLowerCase(Locale.ROOT);
         String normalized = sql.toUpperCase(Locale.ROOT);
-        if ("mysql".equals(upperDbType)) {
+        if ("mysql".equals(upperDbType) || "mariadb".equals(upperDbType)) {
             return normalized.matches("^SET\\s+@[_A-Z0-9$]+\\s*(:=|=).*$");
         }
         if ("mssql".equals(upperDbType)) {
-            return normalized.matches("^DECLARE\\s+@[_A-Z0-9]+.*$")
+            return isAllowedMssqlDeclareStatement(sql)
                     || normalized.matches("^SET\\s+@[_A-Z0-9]+\\s*=.*$");
         }
         return false;
+    }
+
+    private static boolean isAllowedMssqlDeclareStatement(String sql) {
+        String trimmed = sql == null ? "" : sql.trim();
+        if (!trimmed.regionMatches(true, 0, "DECLARE", 0, "DECLARE".length())) {
+            return false;
+        }
+        String body = trimmed.substring("DECLARE".length()).trim();
+        if (body.isEmpty()) {
+            return false;
+        }
+        String sanitizedBody = stripStringsAndComments(body).toUpperCase(Locale.ROOT);
+        if (sanitizedBody.matches("(?s).*\\b(SELECT|DELETE|UPDATE|INSERT|MERGE|EXEC|USE)\\b.*")) {
+            return false;
+        }
+        for (String declaration : splitTopLevelCommaSegments(body)) {
+            if (!isAllowedMssqlScalarDeclaration(declaration)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static List<String> splitTopLevelCommaSegments(String sql) {
+        List<String> segments = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int depth = 0;
+        for (int i = 0; i < sql.length(); i++) {
+            char currentChar = sql.charAt(i);
+            if (currentChar == '(') {
+                depth++;
+            } else if (currentChar == ')') {
+                if (depth > 0) {
+                    depth--;
+                }
+            } else if (currentChar == ',' && depth == 0) {
+                segments.add(current.toString().trim());
+                current.setLength(0);
+                continue;
+            }
+            current.append(currentChar);
+        }
+        if (current.length() > 0) {
+            segments.add(current.toString().trim());
+        }
+        return segments;
+    }
+
+    private static boolean isAllowedMssqlScalarDeclaration(String declaration) {
+        if (declaration == null || declaration.isBlank()) {
+            return false;
+        }
+        int index = 0;
+        if (declaration.charAt(index) != '@') {
+            return false;
+        }
+        index++;
+        while (index < declaration.length() && isMssqlVariableChar(declaration.charAt(index))) {
+            index++;
+        }
+        if (index == 1) {
+            return false;
+        }
+        while (index < declaration.length() && Character.isWhitespace(declaration.charAt(index))) {
+            index++;
+        }
+        if (index >= declaration.length()) {
+            return false;
+        }
+
+        int typeStart = index;
+        int depth = 0;
+        while (index < declaration.length()) {
+            char currentChar = declaration.charAt(index);
+            if (currentChar == '(') {
+                depth++;
+            } else if (currentChar == ')') {
+                if (depth == 0) {
+                    return false;
+                }
+                depth--;
+            } else if (currentChar == '=' && depth == 0) {
+                break;
+            }
+            index++;
+        }
+        if (depth != 0) {
+            return false;
+        }
+
+        String typeClause = declaration.substring(typeStart, index).trim();
+        if (typeClause.isEmpty()) {
+            return false;
+        }
+        if (typeClause.toUpperCase(Locale.ROOT)
+                .matches("(?s).*\\b(SELECT|DELETE|UPDATE|INSERT|MERGE|WITH|EXEC|FROM|WHERE|JOIN)\\b.*")) {
+            return false;
+        }
+        String normalizedType = typeClause.toUpperCase(Locale.ROOT);
+        if ("TABLE".equals(extractFirstKeyword(typeClause))
+                || normalizedType.startsWith("AS TABLE")) {
+            return false;
+        }
+
+        if (index < declaration.length()) {
+            return !declaration.substring(index + 1).trim().isEmpty();
+        }
+        return true;
+    }
+
+    private static boolean isMssqlVariableChar(char currentChar) {
+        return currentChar == '_' || Character.isLetterOrDigit(currentChar);
     }
 
     private static boolean isAllowedReadOnlyStatement(String sql, String firstKeyword) {
@@ -204,7 +389,7 @@ public final class ReadOnlySqlGuard {
         return "";
     }
 
-    private static String extractFirstKeyword(String sql) {
+    static String extractFirstKeyword(String sql) {
         int index = 0;
         while (index < sql.length() && !Character.isLetter(sql.charAt(index))) {
             index++;
@@ -216,7 +401,7 @@ public final class ReadOnlySqlGuard {
         return start < index ? sql.substring(start, index).toUpperCase(Locale.ROOT) : "";
     }
 
-    private static String stripStringsAndComments(String sql) {
+    static String stripStringsAndComments(String sql) {
         StringBuilder sanitized = new StringBuilder();
         boolean inSingle = false;
         boolean inDouble = false;

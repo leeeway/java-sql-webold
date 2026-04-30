@@ -14,13 +14,14 @@ mybatis:
   configuration:
     map-underscore-to-camel-case: true
 project:
-  version: ${PROJECT_VERSION:2.2.0}
+  version: ${PROJECT_VERSION:@project.version@}
   limit: ${PROJECT_LIMIT:20000}
   signkey: ${PROJECT_SIGNKEY:jsw}
   domain: ${PROJECT_DOMAIN:localhost}
   host: ${PROJECT_HOST:http://localhost}
   auto-user-link-enabled: ${PROJECT_AUTO_USER_LINK_ENABLED:false}
   legacy-tls-enabled: ${PROJECT_LEGACY_TLS_ENABLED:false}
+  target-query-timeout-seconds: ${PROJECT_TARGET_QUERY_TIMEOUT_SECONDS:30}
 management:
   endpoints:
     web:
@@ -29,6 +30,11 @@ management:
   endpoint:
     health:
       show-details: never
+oidc:
+  client-id: ${OIDC_CLIENT_ID:oidc-405fcb20619f44c6be06986b33016ce6}
+  client-secret: ${OIDC_CLIENT_SECRET:ztepiconxvoIVppJxhDfnDRzMfI99OWli6LGmxT5p4g}
+  issuer: ${OIDC_ISSUER:https://mdm.gydev.cn}
+  callback-url: ${OIDC_CALLBACK_URL:${PROJECT_HOST:http://localhost:8002}/api/oidc/callback}
 logging:
   level:
     org:

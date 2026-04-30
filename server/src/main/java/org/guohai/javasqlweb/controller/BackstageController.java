@@ -55,8 +55,17 @@ public class BackstageController {
      */
     @ResponseBody
     @RequestMapping(value = "/connlist")
-    public Result<List<ConnectConfigBean>> getConnData(){
-        return backstageService.getConnData();
+    public Result<List<ConnectConfigBean>> getConnData(
+            @RequestParam(value = "keyword", required = false) String keyword,
+            @RequestParam(value = "serverType", required = false) String serverType,
+            @RequestParam(value = "dbName", required = false) String dbName){
+        return backstageService.getConnData(keyword, serverType, dbName);
+    }
+
+    @ResponseBody
+    @RequestMapping(value = "/server-databases/sync", method = RequestMethod.POST)
+    public Result<ServerDatabaseSyncResult> syncServerDatabases(){
+        return backstageService.syncServerDatabases();
     }
 
     /**
@@ -67,6 +76,18 @@ public class BackstageController {
     @ResponseBody
     public Result<List<PoolStatBean>> druidStat(){
         return backstageService.getPoolStats();
+    }
+
+    @RequestMapping(value = "/server-runtime", method = RequestMethod.GET)
+    @ResponseBody
+    public Result<List<TargetPoolStatBean>> serverRuntime() {
+        return backstageService.getTargetPoolStats();
+    }
+
+    @RequestMapping(value = "/server-runtime/{code}/sessions", method = RequestMethod.GET)
+    @ResponseBody
+    public Result<List<TargetSessionStatBean>> serverRuntimeSessions(@PathVariable("code") Integer code) {
+        return backstageService.getTargetPoolSessions(code);
     }
 
     /**
@@ -157,6 +178,17 @@ public class BackstageController {
     }
 
     /**
+     * 测试已保存的服务器连接性
+     * @param code 服务器编号
+     * @return
+     */
+    @ResponseBody
+    @RequestMapping(value = "/testserver/{code}", method = RequestMethod.POST)
+    public Result<String> testSavedServerConnect(@PathVariable("code") Integer code){
+        return backstageService.testSavedServerConnect(code);
+    }
+
+    /**
      * 删除服务器
      * @param code
      * @return
@@ -165,6 +197,12 @@ public class BackstageController {
     @RequestMapping(value = "/delserver", method = RequestMethod.POST)
     public Result<String> delServer(@RequestBody Integer code){
         return backstageService.delServer(code);
+    }
+
+    @ResponseBody
+    @RequestMapping(value = "/resetserver/{code}", method = RequestMethod.POST)
+    public Result<String> resetServer(@PathVariable("code") Integer code){
+        return backstageService.resetServer(code);
     }
 
     /**
