@@ -264,7 +264,7 @@ public class OidcSsfController {
             String token = user.getToken();
             String authStatus = user.getAuthStatus() != null ? user.getAuthStatus().name() : "";
 
-            StringBuilder redirectUrl = new StringBuilder("/?oidc_token=").append(token)
+            StringBuilder redirectUrl = new StringBuilder("/login?oidc_token=").append(token)
                     .append("&auth_status=").append(authStatus);
 
             // BINDING 状态需要传递 authSecret 给前端显示二维码
