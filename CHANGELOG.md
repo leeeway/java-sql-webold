@@ -2,6 +2,15 @@
 
 本文件记录当前 `master` 分支之后到当前 `develop` 工作区的主要变更，按版本和当前未发布改动整理。
 
+## v2.11.6 - 2026-04-30
+
+### Changed
+- 升级 Spring Boot 版本 3.5.9 → 3.5.14，包含安全补丁与性能优化。
+- 升级 Lombok 版本 1.18.44 → 1.18.46。
+- 升级 mssql-jdbc 版本 13.2.1.jre11 → 13.4.0.jre11，新增 SQL Server 2025 支持。
+- 升级 clickhouse-jdbc 版本 0.9.6 → 0.9.8。
+- 升级 webauthn-server-core 版本 2.7.0 → 2.8.1。
+
 ## v2.11.5 - 2026-04-30
 
 ### Changed
