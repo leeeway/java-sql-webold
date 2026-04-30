@@ -2,6 +2,8 @@ package org.guohai.javasqlweb.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.warrenstrange.googleauth.GoogleAuthenticator;
+import com.warrenstrange.googleauth.GoogleAuthenticatorKey;
 import org.guohai.javasqlweb.beans.*;
 import org.guohai.javasqlweb.config.OidcSsfConfig;
 import org.guohai.javasqlweb.dao.OidcConfigDao;
@@ -646,12 +648,33 @@ public class OidcSsfServiceImpl implements OidcSsfService {
             return new Result<>(false, "Failed to create/find user", null);
         }
 
-        // 4. 签发 JSW token
+        // 4. 签发 JSW token，根据 OTP 状态决定登录步骤
         String jswToken = UUID.randomUUID().toString();
+
+        if (user.getAuthStatus() == OtpAuthStatus.UNBIND || user.getAuthStatus() == OtpAuthStatus.BINDING) {
+            // 未绑定 OTP → 生成 secret，进入 BINDING 流程
+            GoogleAuthenticator gAuth = new GoogleAuthenticator();
+            final GoogleAuthenticatorKey key = gAuth.createCredentials();
+            user.setAuthSecret(key.getKey());
+            userManageDao.setUserSecret(user.getAuthSecret(), jswToken, user.getUserName());
+            user.setToken(jswToken);
+            user.setAuthStatus(OtpAuthStatus.BINDING);
+            LOG.info("OIDC login: sub={}, user={}, needs OTP binding", sub, user.getUserName());
+            return new Result<>(true, "OIDC login needs OTP binding", user);
+        }
+
+        if (user.getAuthStatus() == OtpAuthStatus.BIND) {
+            // 已绑定 OTP → 进入 VERIFY 流程（login_status=LOGGING）
+            userManageDao.setUserToken(user.getUserName(), jswToken);
+            user.setToken(jswToken);
+            LOG.info("OIDC login: sub={}, user={}, needs OTP verification", sub, user.getUserName());
+            return new Result<>(true, "OIDC login needs OTP verification", user);
+        }
+
+        // 其他状态：直接登录
         userManageDao.setUserToken(user.getUserName(), jswToken);
         userManageDao.setUserLoginSuccess(jswToken);
         user.setToken(jswToken);
-
         LOG.info("OIDC login successful: sub={}, user={}", sub, user.getUserName());
         return new Result<>(true, "OIDC login success", user);
     }

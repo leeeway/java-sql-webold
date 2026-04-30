@@ -213,8 +213,40 @@ function Login() {
     // 处理 OIDC 登录回调 token
     const oidcToken = searchParams.get('oidc_token');
     if (oidcToken) {
+      const authStatusParam = searchParams.get('auth_status');
+
+      if (authStatusParam === 'BINDING') {
+        // 需要绑定 OTP
+        const authSecret = searchParams.get('auth_secret') || '';
+        const oidcUserName = searchParams.get('user_name') || '';
+        updateState({
+          loginStep: 'BIND',
+          token: oidcToken,
+          authSecret,
+          qrCode: buildOtpUrl(oidcUserName, authSecret),
+          otpDigits: [...EMPTY_OTP_DIGITS],
+          notice: null,
+        });
+        // 清除 URL 参数但留在登录页
+        window.history.replaceState({}, '', '/login');
+        return;
+      }
+
+      if (authStatusParam === 'BIND') {
+        // 需要验证 OTP
+        updateState({
+          loginStep: 'VERIFY',
+          token: oidcToken,
+          otpDigits: [...EMPTY_OTP_DIGITS],
+          notice: null,
+        });
+        // 清除 URL 参数但留在登录页
+        window.history.replaceState({}, '', '/login');
+        return;
+      }
+
+      // 其他状态（已完成登录），直接进入
       cookie.save('token', oidcToken, { path: '/' });
-      // 清除 URL 参数
       window.history.replaceState({}, '', '/');
       navigate('/');
       return;

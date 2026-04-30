@@ -260,9 +260,21 @@ public class OidcSsfController {
                               HttpServletResponse response) throws IOException {
         Result<UserBean> result = oidcSsfService.handleLoginCallback(code, state);
         if (result.getStatus() && result.getData() != null) {
-            // 登录成功，重定向到前端并携带 token
-            String token = result.getData().getToken();
-            response.sendRedirect("/?oidc_token=" + token);
+            UserBean user = result.getData();
+            String token = user.getToken();
+            String authStatus = user.getAuthStatus() != null ? user.getAuthStatus().name() : "";
+
+            StringBuilder redirectUrl = new StringBuilder("/?oidc_token=").append(token)
+                    .append("&auth_status=").append(authStatus);
+
+            // BINDING 状态需要传递 authSecret 给前端显示二维码
+            if ("BINDING".equals(authStatus) && user.getAuthSecret() != null) {
+                redirectUrl.append("&auth_secret=").append(user.getAuthSecret())
+                           .append("&user_name=").append(
+                                   java.net.URLEncoder.encode(user.getUserName(), java.nio.charset.StandardCharsets.UTF_8));
+            }
+
+            response.sendRedirect(redirectUrl.toString());
         } else {
             response.setContentType("text/html;charset=UTF-8");
             response.getWriter().write(
