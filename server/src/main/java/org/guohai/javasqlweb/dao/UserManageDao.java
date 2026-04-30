@@ -279,7 +279,6 @@ public interface UserManageDao {
     @Insert("INSERT INTO user_tb " +
             "(user_name, email, create_time, pass_word, token, account_status, auth_status, login_status, oidc_sub) " +
             "VALUES (#{name}, #{email}, NOW(), #{passwordHash}, '', 'ACTIVE', 'BIND', 'LOGOUT', #{oidcSub})")
-    @Options(useGeneratedKeys = true, keyProperty = "code", keyColumn = "code")
     Boolean addNewOidcUser(@Param("name") String userName,
                            @Param("email") String email,
                            @Param("passwordHash") String passwordHash,

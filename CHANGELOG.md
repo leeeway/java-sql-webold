@@ -2,6 +2,11 @@
 
 本文件记录当前 `master` 分支之后到当前 `develop` 工作区的主要变更，按版本和当前未发布改动整理。
 
+## v2.11.3 - 2026-04-30
+
+### Fixed
+- 修复 OIDC 登录自动创建用户时因 MyBatis `@Options(useGeneratedKeys=true, keyProperty="code")` 在多 `@Param` 参数方法上无法确定主键回填目标而抛出异常的问题，导致用户虽已插入数据库但流程进入错误分支返回"Failed to create/find user"。
+
 ## v2.11.2 - 2026-04-29
 
 ### Added
