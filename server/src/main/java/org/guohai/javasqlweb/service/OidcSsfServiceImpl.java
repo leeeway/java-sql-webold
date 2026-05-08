@@ -5,13 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.warrenstrange.googleauth.GoogleAuthenticator;
 import com.warrenstrange.googleauth.GoogleAuthenticatorKey;
 import org.guohai.javasqlweb.beans.*;
-import org.guohai.javasqlweb.config.OidcSsfConfig;
 import org.guohai.javasqlweb.dao.OidcConfigDao;
 import org.guohai.javasqlweb.dao.UserManageDao;
 import org.guohai.javasqlweb.util.PasswordUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import jakarta.servlet.http.HttpServletRequest;
 
 import java.io.IOException;
 import java.net.URI;
@@ -38,7 +38,6 @@ public class OidcSsfServiceImpl implements OidcSsfService {
 
     private static final Logger LOG = LoggerFactory.getLogger(OidcSsfServiceImpl.class);
 
-    private final OidcSsfConfig config;
     private final OidcConfigDao oidcConfigDao;
     private final UserManageDao userManageDao;
     private final ObjectMapper objectMapper;
@@ -61,9 +60,8 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     private final CopyOnWriteArrayList<SsfEvent> eventLog = new CopyOnWriteArrayList<>();
     private static final int MAX_EVENT_LOG = 500;
 
-    public OidcSsfServiceImpl(OidcSsfConfig config, OidcConfigDao oidcConfigDao,
-                               UserManageDao userManageDao, ObjectMapper objectMapper) {
-        this.config = config;
+    public OidcSsfServiceImpl(OidcConfigDao oidcConfigDao,
+                              UserManageDao userManageDao, ObjectMapper objectMapper) {
         this.oidcConfigDao = oidcConfigDao;
         this.userManageDao = userManageDao;
         this.objectMapper = objectMapper;
@@ -72,36 +70,80 @@ public class OidcSsfServiceImpl implements OidcSsfService {
                 .build();
     }
 
-    /**
-     * 获取生效的 OIDC 配置：优先数据库，fallback 到 yml。
-     */
-    private OidcConfigBean getEffectiveConfig() {
+    private OidcConfigBean getDbConfig() {
         try {
-            OidcConfigBean dbConfig = oidcConfigDao.getOidcConfig();
-            if (dbConfig != null && Boolean.TRUE.equals(dbConfig.getEnabled())) {
-                dbConfig.setConfigSource("database");
-                return dbConfig;
+            OidcConfigBean config = oidcConfigDao.getOidcConfig();
+            if (config != null) {
+                config.setConfigSource("database");
             }
+            return config;
         } catch (Exception e) {
-            LOG.warn("Failed to load OIDC config from DB, falling back to yml", e);
+            LOG.warn("Failed to load OIDC config from DB", e);
+            return null;
         }
-        // fallback 到 application.yml
-        OidcConfigBean fallback = OidcConfigBean.builder()
-                .clientId(config.getClientId())
-                .clientSecret(config.getClientSecret())
-                .issuer(config.getIssuer())
-                .callbackUrl(config.getCallbackUrl())
-                .enabled(true)
-                .configSource("yml")
-                .build();
-        return fallback;
+    }
+
+    private boolean isConfiguredAndEnabled(OidcConfigBean cfg) {
+        return cfg != null
+                && Boolean.TRUE.equals(cfg.getEnabled())
+                && notBlank(cfg.getClientId())
+                && notBlank(cfg.getClientSecret())
+                && notBlank(cfg.getOpenidConfigurationUrl())
+                && notBlank(cfg.getSsfConfigurationUrl());
+    }
+
+    private static boolean notBlank(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private String buildOrigin(HttpServletRequest request) {
+        String proto = firstHeader(request, "X-Forwarded-Proto");
+        String host = firstHeader(request, "X-Forwarded-Host");
+        String port = firstHeader(request, "X-Forwarded-Port");
+
+        if (notBlank(proto) && notBlank(host)) {
+            String normalizedHost = host.split(",")[0].trim();
+            String normalizedProto = proto.split(",")[0].trim();
+            String normalizedPort = notBlank(port) ? port.split(",")[0].trim() : "";
+            boolean defaultPort = ("http".equalsIgnoreCase(normalizedProto) && "80".equals(normalizedPort))
+                    || ("https".equalsIgnoreCase(normalizedProto) && "443".equals(normalizedPort));
+            if (notBlank(normalizedPort) && !defaultPort && !normalizedHost.contains(":")) {
+                return normalizedProto + "://" + normalizedHost + ":" + normalizedPort;
+            }
+            return normalizedProto + "://" + normalizedHost;
+        }
+
+        String reqHost = request.getHeader("Host");
+        if (!notBlank(reqHost)) {
+            reqHost = request.getServerName();
+            int reqPort = request.getServerPort();
+            boolean defaultPort = ("http".equalsIgnoreCase(request.getScheme()) && reqPort == 80)
+                    || ("https".equalsIgnoreCase(request.getScheme()) && reqPort == 443);
+            if (!defaultPort && reqPort > 0) {
+                reqHost = reqHost + ":" + reqPort;
+            }
+        }
+        return request.getScheme() + "://" + reqHost;
+    }
+
+    private static String firstHeader(HttpServletRequest request, String name) {
+        String value = request.getHeader(name);
+        return value == null ? "" : value;
+    }
+
+    private String buildAdminCallbackUrl(HttpServletRequest request) {
+        return buildOrigin(request) + "/api/oidc/callback";
+    }
+
+    private String buildLoginCallbackUrl(HttpServletRequest request) {
+        return buildOrigin(request) + "/api/oidc/login/callback";
     }
 
     // ════════════════════════════════════════════════════════
     //  OIDC Discovery
     // ════════════════════════════════════════════════════════
 
-    private Map<String, Object> getOidcDiscovery() {
+    private Map<String, Object> getOidcDiscovery(OidcConfigBean cfg) {
         if (oidcDiscovery != null) {
             return oidcDiscovery;
         }
@@ -110,7 +152,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
                 return oidcDiscovery;
             }
             try {
-                String url = getEffectiveConfig().getIssuer() + "/.well-known/openid-configuration";
+                String url = cfg.getOpenidConfigurationUrl();
                 oidcDiscovery = httpGetJson(url);
                 LOG.info("OIDC discovery loaded from {}", url);
             } catch (Exception e) {
@@ -121,7 +163,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         return oidcDiscovery;
     }
 
-    private Map<String, Object> getSsfDiscovery() {
+    private Map<String, Object> getSsfDiscovery(OidcConfigBean cfg) {
         if (ssfDiscovery != null) {
             return ssfDiscovery;
         }
@@ -130,7 +172,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
                 return ssfDiscovery;
             }
             try {
-                String url = getEffectiveConfig().getIssuer() + "/.well-known/ssf-configuration";
+                String url = cfg.getSsfConfigurationUrl();
                 ssfDiscovery = httpGetJson(url);
                 LOG.info("SSF discovery loaded from {}", url);
             } catch (Exception e) {
@@ -141,13 +183,13 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         return ssfDiscovery;
     }
 
-    private String disc(String key) {
-        Object v = getOidcDiscovery().get(key);
+    private String disc(OidcConfigBean cfg, String key) {
+        Object v = getOidcDiscovery(cfg).get(key);
         return v != null ? v.toString() : "";
     }
 
-    private String ssfDisc(String key) {
-        Object v = getSsfDiscovery().get(key);
+    private String ssfDisc(OidcConfigBean cfg, String key) {
+        Object v = getSsfDiscovery(cfg).get(key);
         return v != null ? v.toString() : "";
     }
 
@@ -156,7 +198,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     // ════════════════════════════════════════════════════════
 
     @Override
-    public Map<String, String> buildAuthorizationUrl() {
+    public Map<String, String> buildAuthorizationUrl(HttpServletRequest request) {
         String state = generateRandomString(32);
         String codeVerifier = generateRandomString(64);
         String codeChallenge = computeS256Challenge(codeVerifier);
@@ -164,14 +206,18 @@ public class OidcSsfServiceImpl implements OidcSsfService {
 
         pkceStore.put(state, codeVerifier);
 
-        OidcConfigBean effectiveConfig = getEffectiveConfig();
-        String authEndpoint = disc("authorization_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            throw new IllegalStateException("OIDC config is not enabled");
+        }
+        String authEndpoint = disc(effectiveConfig, "authorization_endpoint");
         String scopes = "openid email profile ssf.manage ssf.read";
+        String callbackUrl = buildAdminCallbackUrl(request);
 
         String url = authEndpoint
                 + "?response_type=code"
                 + "&client_id=" + enc(effectiveConfig.getClientId())
-                + "&redirect_uri=" + enc(effectiveConfig.getCallbackUrl())
+                + "&redirect_uri=" + enc(callbackUrl)
                 + "&scope=" + enc(scopes)
                 + "&state=" + enc(state)
                 + "&code_challenge=" + enc(codeChallenge)
@@ -182,17 +228,21 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     }
 
     @Override
-    public Result<OidcTokenInfo> exchangeCodeForTokens(String code, String state) {
+    public Result<OidcTokenInfo> exchangeCodeForTokens(String code, String state, HttpServletRequest request) {
         String codeVerifier = pkceStore.remove(state);
         if (codeVerifier == null) {
             return new Result<>(false, "Invalid state parameter", null);
         }
 
-        OidcConfigBean effectiveConfig = getEffectiveConfig();
-        String tokenEndpoint = disc("token_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String tokenEndpoint = disc(effectiveConfig, "token_endpoint");
+        String callbackUrl = buildAdminCallbackUrl(request);
         String body = "grant_type=authorization_code"
                 + "&code=" + enc(code)
-                + "&redirect_uri=" + enc(effectiveConfig.getCallbackUrl())
+                + "&redirect_uri=" + enc(callbackUrl)
                 + "&client_id=" + enc(effectiveConfig.getClientId())
                 + "&client_secret=" + enc(effectiveConfig.getClientSecret())
                 + "&code_verifier=" + enc(codeVerifier);
@@ -229,8 +279,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
             return new Result<>(false, "No refresh token available", null);
         }
 
-        OidcConfigBean effectiveConfig = getEffectiveConfig();
-        String tokenEndpoint = disc("token_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String tokenEndpoint = disc(effectiveConfig, "token_endpoint");
         String body = "grant_type=refresh_token"
                 + "&refresh_token=" + enc(storedTokens.getRefreshToken())
                 + "&client_id=" + enc(effectiveConfig.getClientId())
@@ -296,7 +349,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         if (storedTokens == null) {
             return new Result<>(false, "Not connected to OIDC provider", null);
         }
-        String endpoint = ssfDisc("configuration_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String endpoint = ssfDisc(effectiveConfig, "configuration_endpoint");
         try {
             Map<String, Object> response = httpGetJsonAuth(endpoint, storedTokens.getAccessToken());
             return new Result<>(true, "OK", parseSsfStreamConfig(response));
@@ -311,7 +368,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         if (storedTokens == null) {
             return new Result<>(false, "Not connected to OIDC provider", null);
         }
-        String endpoint = ssfDisc("configuration_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String endpoint = ssfDisc(effectiveConfig, "configuration_endpoint");
 
         Map<String, Object> requestBody = new LinkedHashMap<>();
         Map<String, Object> delivery = new LinkedHashMap<>();
@@ -337,7 +398,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         if (storedTokens == null) {
             return new Result<>(false, "Not connected to OIDC provider", null);
         }
-        String endpoint = ssfDisc("configuration_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String endpoint = ssfDisc(effectiveConfig, "configuration_endpoint");
 
         Map<String, Object> requestBody = new LinkedHashMap<>();
         if (status != null) {
@@ -362,7 +427,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         if (storedTokens == null) {
             return new Result<>(false, "Not connected to OIDC provider", null);
         }
-        String endpoint = ssfDisc("configuration_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String endpoint = ssfDisc(effectiveConfig, "configuration_endpoint");
         try {
             httpDeleteAuth(endpoint, storedTokens.getAccessToken());
             return new Result<>(true, "Stream deleted", null);
@@ -377,7 +446,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         if (storedTokens == null) {
             return new Result<>(false, "Not connected to OIDC provider", null);
         }
-        String endpoint = ssfDisc("verification_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String endpoint = ssfDisc(effectiveConfig, "verification_endpoint");
         try {
             Map<String, Object> requestBody = Map.of("state", generateRandomString(16));
             String json = objectMapper.writeValueAsString(requestBody);
@@ -451,8 +524,12 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     // ════════════════════════════════════════════════════════
 
     @Override
-    public Result<OidcConfigBean> getOidcConfig() {
-        OidcConfigBean effective = getEffectiveConfig();
+    public Result<OidcConfigBean> getOidcConfig(HttpServletRequest request) {
+        OidcConfigBean effective = getDbConfig();
+        if (effective == null) {
+            return new Result<>(true, "OK", null);
+        }
+        effective.setCallbackUrl(buildAdminCallbackUrl(request));
         // 脱敏 secret
         if (effective.getClientSecret() != null && effective.getClientSecret().length() > 8) {
             effective.setClientSecret(
@@ -465,6 +542,12 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     @Override
     public Result<OidcConfigBean> saveOidcConfig(OidcConfigBean incoming) {
         try {
+            if (!notBlank(incoming.getClientId())
+                    || !notBlank(incoming.getClientSecret())
+                    || !notBlank(incoming.getOpenidConfigurationUrl())
+                    || !notBlank(incoming.getSsfConfigurationUrl())) {
+                return new Result<>(false, "ClientId/Secret/OpenID URL/SSF URL 均为必填", null);
+            }
             OidcConfigBean existing = oidcConfigDao.getOidcConfig();
             if (existing != null) {
                 // 如果前端传的是脱敏 secret（含 ****），保留原值
@@ -502,7 +585,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         try {
             oidcConfigDao.deleteAllOidcConfig();
             clearDiscoveryCache();
-            return new Result<>(true, "配置已删除，将回退到 yml 配置", null);
+            return new Result<>(true, "配置已删除，OIDC 登录已禁用", null);
         } catch (Exception e) {
             LOG.error("Failed to delete OIDC config", e);
             return new Result<>(false, "删除失败: " + e.getMessage(), null);
@@ -510,22 +593,24 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     }
 
     @Override
-    public Result<Map<String, Object>> testOidcConnection(String issuer) {
-        if (issuer == null || issuer.isBlank()) {
-            return new Result<>(false, "Issuer URL 不能为空", null);
+    public Result<Map<String, Object>> testOidcConnection(String openidConfigurationUrl, String ssfConfigurationUrl) {
+        if (!notBlank(openidConfigurationUrl) || !notBlank(ssfConfigurationUrl)) {
+            return new Result<>(false, "OpenID/SSF Configuration URL 不能为空", null);
         }
-        String url = issuer.replaceAll("/+$", "") + "/.well-known/openid-configuration";
         try {
-            Map<String, Object> discovery = httpGetJson(url);
-            if (discovery.containsKey("authorization_endpoint")) {
+            Map<String, Object> openidDiscovery = httpGetJson(openidConfigurationUrl);
+            Map<String, Object> ssfDiscoveryDoc = httpGetJson(ssfConfigurationUrl);
+            if (openidDiscovery.containsKey("authorization_endpoint") && ssfDiscoveryDoc.containsKey("configuration_endpoint")) {
                 Map<String, Object> summary = new LinkedHashMap<>();
-                summary.put("issuer", discovery.get("issuer"));
-                summary.put("authorization_endpoint", discovery.get("authorization_endpoint"));
-                summary.put("token_endpoint", discovery.get("token_endpoint"));
-                summary.put("userinfo_endpoint", discovery.get("userinfo_endpoint"));
+                summary.put("issuer", openidDiscovery.get("issuer"));
+                summary.put("authorization_endpoint", openidDiscovery.get("authorization_endpoint"));
+                summary.put("token_endpoint", openidDiscovery.get("token_endpoint"));
+                summary.put("userinfo_endpoint", openidDiscovery.get("userinfo_endpoint"));
+                summary.put("ssf_configuration_endpoint", ssfDiscoveryDoc.get("configuration_endpoint"));
+                summary.put("ssf_verification_endpoint", ssfDiscoveryDoc.get("verification_endpoint"));
                 return new Result<>(true, "连接成功", summary);
             }
-            return new Result<>(false, "返回的 discovery 文档缺少 authorization_endpoint", null);
+            return new Result<>(false, "Discovery 文档缺少关键字段", null);
         } catch (Exception e) {
             return new Result<>(false, "连接失败: " + e.getMessage(), null);
         }
@@ -543,18 +628,15 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     @Override
     public boolean isOidcLoginEnabled() {
         try {
-            OidcConfigBean cfg = getEffectiveConfig();
-            return cfg != null
-                    && Boolean.TRUE.equals(cfg.getEnabled())
-                    && cfg.getClientId() != null && !cfg.getClientId().isBlank()
-                    && cfg.getIssuer() != null && !cfg.getIssuer().isBlank();
+            OidcConfigBean cfg = getDbConfig();
+            return isConfiguredAndEnabled(cfg);
         } catch (Exception e) {
             return false;
         }
     }
 
     @Override
-    public Map<String, String> buildLoginAuthorizationUrl() {
+    public Map<String, String> buildLoginAuthorizationUrl(HttpServletRequest request) {
         String state = generateRandomString(32);
         String codeVerifier = generateRandomString(64);
         String codeChallenge = computeS256Challenge(codeVerifier);
@@ -562,13 +644,13 @@ public class OidcSsfServiceImpl implements OidcSsfService {
 
         pkceStore.put(state, codeVerifier);
 
-        OidcConfigBean effectiveConfig = getEffectiveConfig();
-        String authEndpoint = disc("authorization_endpoint");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            throw new IllegalStateException("OIDC config is not enabled");
+        }
+        String authEndpoint = disc(effectiveConfig, "authorization_endpoint");
         String scopes = "openid email profile";
-
-        // 登录回调使用专门的 login/callback 路径
-        String loginCallbackUrl = effectiveConfig.getCallbackUrl()
-                .replace("/api/oidc/callback", "/api/oidc/login/callback");
+        String loginCallbackUrl = buildLoginCallbackUrl(request);
 
         String url = authEndpoint
                 + "?response_type=code"
@@ -584,18 +666,20 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     }
 
     @Override
-    public Result<UserBean> handleLoginCallback(String code, String state) {
+    public Result<UserBean> handleLoginCallback(String code, String state, HttpServletRequest request) {
         String codeVerifier = pkceStore.remove(state);
         if (codeVerifier == null) {
             return new Result<>(false, "Invalid state parameter", null);
         }
 
-        OidcConfigBean effectiveConfig = getEffectiveConfig();
-        String loginCallbackUrl = effectiveConfig.getCallbackUrl()
-                .replace("/api/oidc/callback", "/api/oidc/login/callback");
+        OidcConfigBean effectiveConfig = getDbConfig();
+        if (!isConfiguredAndEnabled(effectiveConfig)) {
+            return new Result<>(false, "OIDC config is not enabled", null);
+        }
+        String loginCallbackUrl = buildLoginCallbackUrl(request);
 
         // 1. 换取令牌
-        String tokenEndpoint = disc("token_endpoint");
+        String tokenEndpoint = disc(effectiveConfig, "token_endpoint");
         String body = "grant_type=authorization_code"
                 + "&code=" + enc(code)
                 + "&redirect_uri=" + enc(loginCallbackUrl)
@@ -626,7 +710,7 @@ public class OidcSsfServiceImpl implements OidcSsfService {
         // 2. 获取 userinfo
         Map<String, Object> userInfoData;
         try {
-            String userinfoEndpoint = disc("userinfo_endpoint");
+            String userinfoEndpoint = disc(effectiveConfig, "userinfo_endpoint");
             userInfoData = httpGetJsonAuth(userinfoEndpoint, accessToken);
         } catch (Exception e) {
             LOG.error("OIDC login userinfo failed", e);
@@ -749,7 +833,11 @@ public class OidcSsfServiceImpl implements OidcSsfService {
     // ════════════════════════════════════════════════════════
 
     private void fetchAndStoreUserInfo(String accessToken) throws IOException, InterruptedException {
-        String userinfoEndpoint = disc("userinfo_endpoint");
+        OidcConfigBean cfg = getDbConfig();
+        if (!isConfiguredAndEnabled(cfg)) {
+            throw new IOException("OIDC config is not enabled");
+        }
+        String userinfoEndpoint = disc(cfg, "userinfo_endpoint");
         Map<String, Object> data = httpGetJsonAuth(userinfoEndpoint, accessToken);
         storedUserInfo = OidcUserInfo.builder()
                 .sub(strVal(data, "sub"))

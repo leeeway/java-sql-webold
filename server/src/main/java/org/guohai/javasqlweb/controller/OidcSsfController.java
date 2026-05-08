@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -34,9 +35,13 @@ public class OidcSsfController {
     @AdminPageRequired
     @GetMapping("/api/oidc/auth-url")
     @ResponseBody
-    public Result<Map<String, String>> getAuthUrl() {
-        Map<String, String> data = oidcSsfService.buildAuthorizationUrl();
-        return new Result<>(true, "OK", data);
+    public Result<Map<String, String>> getAuthUrl(HttpServletRequest request) {
+        try {
+            Map<String, String> data = oidcSsfService.buildAuthorizationUrl(request);
+            return new Result<>(true, "OK", data);
+        } catch (Exception e) {
+            return new Result<>(false, "OIDC is not configured", null);
+        }
     }
 
     /**
@@ -45,8 +50,9 @@ public class OidcSsfController {
     @GetMapping("/api/oidc/callback")
     public void callback(@RequestParam("code") String code,
                          @RequestParam("state") String state,
+                         HttpServletRequest request,
                          HttpServletResponse response) throws IOException {
-        Result<OidcTokenInfo> result = oidcSsfService.exchangeCodeForTokens(code, state);
+        Result<OidcTokenInfo> result = oidcSsfService.exchangeCodeForTokens(code, state, request);
         if (result.getStatus()) {
             // 授权成功，重定向回 Admin 页面
             response.sendRedirect("/admin");
@@ -190,8 +196,8 @@ public class OidcSsfController {
     @AdminPageRequired
     @GetMapping("/api/oidc/config")
     @ResponseBody
-    public Result<OidcConfigBean> getOidcConfig() {
-        return oidcSsfService.getOidcConfig();
+    public Result<OidcConfigBean> getOidcConfig(HttpServletRequest request) {
+        return oidcSsfService.getOidcConfig(request);
     }
 
     /**
@@ -221,8 +227,7 @@ public class OidcSsfController {
     @PostMapping("/api/oidc/config/test")
     @ResponseBody
     public Result<Map<String, Object>> testOidcConnection(@RequestBody Map<String, String> body) {
-        String issuer = body.get("issuer");
-        return oidcSsfService.testOidcConnection(issuer);
+        return oidcSsfService.testOidcConnection(body.get("openidConfigurationUrl"), body.get("ssfConfigurationUrl"));
     }
 
     // ── OIDC Login ──────────────────────────────────────
@@ -242,12 +247,16 @@ public class OidcSsfController {
      */
     @GetMapping("/api/oidc/login-url")
     @ResponseBody
-    public Result<Map<String, String>> getLoginUrl() {
+    public Result<Map<String, String>> getLoginUrl(HttpServletRequest request) {
         if (!oidcSsfService.isOidcLoginEnabled()) {
             return new Result<>(false, "OIDC login is not enabled", null);
         }
-        Map<String, String> data = oidcSsfService.buildLoginAuthorizationUrl();
-        return new Result<>(true, "OK", data);
+        try {
+            Map<String, String> data = oidcSsfService.buildLoginAuthorizationUrl(request);
+            return new Result<>(true, "OK", data);
+        } catch (Exception e) {
+            return new Result<>(false, "OIDC login is not enabled", null);
+        }
     }
 
     /**
@@ -257,8 +266,9 @@ public class OidcSsfController {
     @GetMapping("/api/oidc/login/callback")
     public void loginCallback(@RequestParam("code") String code,
                               @RequestParam("state") String state,
+                              HttpServletRequest request,
                               HttpServletResponse response) throws IOException {
-        Result<UserBean> result = oidcSsfService.handleLoginCallback(code, state);
+        Result<UserBean> result = oidcSsfService.handleLoginCallback(code, state, request);
         if (result.getStatus() && result.getData() != null) {
             UserBean user = result.getData();
             String token = user.getToken();

@@ -1,6 +1,7 @@
 package org.guohai.javasqlweb.service;
 
 import org.guohai.javasqlweb.beans.*;
+import jakarta.servlet.http.HttpServletRequest;
 
 import java.util.List;
 import java.util.Map;
@@ -16,7 +17,7 @@ public interface OidcSsfService {
      * 构建 OIDC 授权 URL (含 PKCE)
      * @return 包含 authUrl 和 state 的 Map
      */
-    Map<String, String> buildAuthorizationUrl();
+    Map<String, String> buildAuthorizationUrl(HttpServletRequest request);
 
     /**
      * 用授权码换取令牌
@@ -24,7 +25,7 @@ public interface OidcSsfService {
      * @param state 状态参数(用于查找 code_verifier)
      * @return 令牌信息
      */
-    Result<OidcTokenInfo> exchangeCodeForTokens(String code, String state);
+    Result<OidcTokenInfo> exchangeCodeForTokens(String code, String state, HttpServletRequest request);
 
     /**
      * 刷新令牌
@@ -105,7 +106,7 @@ public interface OidcSsfService {
      * 获取当前 OIDC 配置（secret 脱敏）
      * @return 配置信息
      */
-    Result<OidcConfigBean> getOidcConfig();
+    Result<OidcConfigBean> getOidcConfig(HttpServletRequest request);
 
     /**
      * 保存 OIDC 配置（新增或更新）
@@ -121,11 +122,10 @@ public interface OidcSsfService {
     Result<String> deleteOidcConfig();
 
     /**
-     * 测试 OIDC Provider 连通性
-     * @param issuer Issuer URL
+     * 测试 OIDC/SSF Discovery 连通性
      * @return 测试结果
      */
-    Result<Map<String, Object>> testOidcConnection(String issuer);
+    Result<Map<String, Object>> testOidcConnection(String openidConfigurationUrl, String ssfConfigurationUrl);
 
     // ── OIDC Login ──────────────────────────────────────
 
@@ -139,7 +139,7 @@ public interface OidcSsfService {
      * 构建登录用的 OIDC 授权 URL
      * @return 包含 authUrl 和 state 的 Map
      */
-    Map<String, String> buildLoginAuthorizationUrl();
+    Map<String, String> buildLoginAuthorizationUrl(HttpServletRequest request);
 
     /**
      * 处理 OIDC 登录回调：换令牌 → 取 userinfo → 查找/创建用户 → 签发 token
@@ -147,5 +147,5 @@ public interface OidcSsfService {
      * @param state 状态参数
      * @return 包含 token 的用户信息
      */
-    Result<UserBean> handleLoginCallback(String code, String state);
+    Result<UserBean> handleLoginCallback(String code, String state, HttpServletRequest request);
 }

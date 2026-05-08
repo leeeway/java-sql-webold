@@ -30,11 +30,6 @@ management:
   endpoint:
     health:
       show-details: never
-oidc:
-  client-id: ${OIDC_CLIENT_ID:oidc-405fcb20619f44c6be06986b33016ce6}
-  client-secret: ${OIDC_CLIENT_SECRET:ztepiconxvoIVppJxhDfnDRzMfI99OWli6LGmxT5p4g}
-  issuer: ${OIDC_ISSUER:https://mdm.gydev.cn}
-  callback-url: ${OIDC_CALLBACK_URL:${PROJECT_HOST:http://localhost:8002}/api/oidc/callback}
 logging:
   level:
     org:
