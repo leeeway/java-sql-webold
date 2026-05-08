@@ -822,6 +822,11 @@ function PageContent() {
                         <div className="workbench-editor-tip">
                           敲入关键字首字母后可使用 Ctrl+Space 快速补全，选中部分 SQL 时只执行选中语句。
                         </div>
+                        <div className="workbench-editor-actions">
+                          <Button id="button_submit_query" onClick={executeSql} type="primary">
+                            执行 SQL
+                          </Button>
+                        </div>
                       </div>
                       <div id="tablefieldscontainer" className="workbench-history-panel">
                         <div className="workbench-panel-heading">
@@ -862,9 +867,6 @@ function PageContent() {
                     />
                   </div>
                   <div className="workbench-query-toolbar-actions">
-                    <Button id="button_submit_query" onClick={executeSql} type="primary">
-                      执行 SQL
-                    </Button>
                     {pane.queryResult.length !== 0 ? (
                       <Button onClick={() => exportQueryResult(pane)}>导出查询结果</Button>
                     ) : null}
