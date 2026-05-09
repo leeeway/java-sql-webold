@@ -2,6 +2,24 @@
 
 本文件记录当前 `master` 分支之后到当前 `develop` 工作区的主要变更，按版本和当前未发布改动整理。
 
+## v2.11.8 - 2026-05-08
+
+### Changed
+- OIDC 配置改为仅从数据库读取，移除 `application.yml` 兜底来源；登录页 OIDC 按钮仅在数据库配置完整且启用时显示。
+- OIDC 配置模型收敛为 `clientId`、`clientSecret`、`openidConfigurationUrl`、`ssfConfigurationUrl` 四项，回调地址改为服务端按当前访问域名动态计算并只读回显。
+- OIDC Admin/登录授权链路改为基于请求上下文动态生成 `redirect_uri`，优先使用 `X-Forwarded-*` 头，兼容反向代理场景。
+- OIDC 配置页改造为 OpenID/SSF 双 discovery URL 配置与连通性测试，移除可编辑 callback 输入与“回退 yml”文案。
+
+### Added
+- 新增数据库升级脚本 `deploy/upgrade/2026-05-08-oidc-db-only.sql`，用于新增并迁移 `openid_configuration_url`、`ssf_configuration_url` 字段。
+
+## v2.11.7 - 2026-05-08
+
+### Changed
+- 工作台左侧表名列表为长对象名补充悬浮完整名称展示（含行数），保留单行省略以维持列表密度。
+- 工作台“执行 SQL”按钮调整到 SQL 编辑器下方右侧，缩短操作动线并保留底部结果视图/导出工具栏。
+- 为工作台查询工具区补充小屏换行样式，避免窄屏下控件拥挤。
+
 ## v2.11.6 - 2026-04-30
 
 ### Changed

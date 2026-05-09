@@ -259,6 +259,17 @@ export interface SsfStreamConfig {
   rawConfig?: Record<string, unknown>;
 }
 
+export interface OidcConfigData {
+  code?: number;
+  clientId?: string;
+  clientSecret?: string;
+  openidConfigurationUrl?: string;
+  ssfConfigurationUrl?: string;
+  callbackUrl?: string;
+  enabled?: boolean;
+  configSource?: string;
+}
+
 export interface SsfEvent {
   jti?: string;
   iss?: string;

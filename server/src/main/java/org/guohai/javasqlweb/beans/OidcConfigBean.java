@@ -26,10 +26,13 @@ public class OidcConfigBean {
     /** OIDC Client Secret */
     private String clientSecret;
 
-    /** OIDC Issuer URL */
-    private String issuer;
+    /** OpenID Discovery URL */
+    private String openidConfigurationUrl;
 
-    /** OIDC 回调地址 */
+    /** SSF Discovery URL */
+    private String ssfConfigurationUrl;
+
+    /** OIDC 回调地址（动态计算，仅回显） */
     private String callbackUrl;
 
     /** 是否启用 */

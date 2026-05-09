@@ -101,7 +101,8 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
   const [configForm, setConfigForm] = useState({
     clientId: '',
     clientSecret: '',
-    issuer: '',
+    openidConfigurationUrl: '',
+    ssfConfigurationUrl: '',
     callbackUrl: '',
     enabled: true,
   });
@@ -188,7 +189,8 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
         setConfigForm({
           clientId: d.clientId || '',
           clientSecret: d.clientSecret || '',
-          issuer: d.issuer || '',
+          openidConfigurationUrl: d.openidConfigurationUrl || '',
+          ssfConfigurationUrl: d.ssfConfigurationUrl || '',
           callbackUrl: d.callbackUrl || '',
           enabled: d.enabled !== false,
         });
@@ -201,8 +203,8 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
   };
 
   const handleSaveConfig = async () => {
-    if (!configForm.clientId || !configForm.issuer) {
-      message.warning('Client ID 和 Issuer URL 为必填项');
+    if (!configForm.clientId || !configForm.clientSecret || !configForm.openidConfigurationUrl || !configForm.ssfConfigurationUrl) {
+      message.warning('Client ID / Secret / OpenID URL / SSF URL 为必填项');
       return;
     }
     setConfigSaving(true);
@@ -241,8 +243,8 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
   };
 
   const handleTestConnection = async () => {
-    if (!configForm.issuer) {
-      message.warning('请先填写 Issuer URL');
+    if (!configForm.openidConfigurationUrl || !configForm.ssfConfigurationUrl) {
+      message.warning('请先填写 OpenID/SSF Configuration URL');
       return;
     }
     setConfigTesting(true);
@@ -251,7 +253,10 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
       const client = createClient();
       const res = await client.post('/api/oidc/config/test', {
         ...headers,
-        body: JSON.stringify({ issuer: configForm.issuer }),
+        body: JSON.stringify({
+          openidConfigurationUrl: configForm.openidConfigurationUrl,
+          ssfConfigurationUrl: configForm.ssfConfigurationUrl,
+        }),
       });
       setTestResult(res.jsonData);
       if (res.jsonData.status) {
@@ -798,10 +803,10 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
             <Text type="secondary">
               配置来源：
               <Tag
-                color={configData?.configSource === 'database' ? 'purple' : 'default'}
+                color="purple"
                 style={{ marginLeft: 8 }}
               >
-                {configData?.configSource === 'database' ? '数据库' : 'application.yml'}
+                数据库
               </Tag>
             </Text>
           </Col>
@@ -833,11 +838,11 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
             </Row>
             <Row gutter={16}>
               <Col span={12}>
-                <Form.Item label="Issuer URL" required>
+                <Form.Item label="OpenID Configuration URL" required>
                   <Input
-                    placeholder="https://idp.example.com"
-                    value={configForm.issuer}
-                    onChange={(e) => setConfigForm({ ...configForm, issuer: e.target.value })}
+                    placeholder="https://idp.example.com/.well-known/openid-configuration"
+                    value={configForm.openidConfigurationUrl}
+                    onChange={(e) => setConfigForm({ ...configForm, openidConfigurationUrl: e.target.value })}
                     addonAfter={
                       <Button
                         type="link"
@@ -853,12 +858,19 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
                 </Form.Item>
               </Col>
               <Col span={12}>
-                <Form.Item label="Callback URL">
+                <Form.Item label="SSF Configuration URL" required>
                   <Input
-                    placeholder="https://your-app.com/api/oidc/callback"
-                    value={configForm.callbackUrl}
-                    onChange={(e) => setConfigForm({ ...configForm, callbackUrl: e.target.value })}
+                    placeholder="https://idp.example.com/.well-known/ssf-configuration"
+                    value={configForm.ssfConfigurationUrl}
+                    onChange={(e) => setConfigForm({ ...configForm, ssfConfigurationUrl: e.target.value })}
                   />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Row gutter={16}>
+              <Col span={24}>
+                <Form.Item label="Callback URL（自动计算，只读）">
+                  <Input value={configForm.callbackUrl} readOnly />
                 </Form.Item>
               </Col>
             </Row>
@@ -889,9 +901,9 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
                 >
                   保存配置
                 </Button>
-                {configData?.configSource === 'database' && (
+                {configData && (
                   <Popconfirm
-                    title="确认删除数据库中的 OIDC 配置？删除后将回退到 yml 配置。"
+                    title="确认删除数据库中的 OIDC 配置？删除后登录页不再显示 OIDC 登录。"
                     onConfirm={handleDeleteConfig}
                     okText="确认"
                     cancelText="取消"
@@ -937,6 +949,16 @@ function OidcSsfPanel({ token }: OidcSsfPanelProps) {
                   <Descriptions.Item label="UserInfo Endpoint">
                     <Text copyable style={{ fontSize: 12 }}>
                       {testResult.data?.userinfo_endpoint || '-'}
+                    </Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="SSF Configuration Endpoint">
+                    <Text copyable style={{ fontSize: 12 }}>
+                      {testResult.data?.ssf_configuration_endpoint || '-'}
+                    </Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="SSF Verification Endpoint">
+                    <Text copyable style={{ fontSize: 12 }}>
+                      {testResult.data?.ssf_verification_endpoint || '-'}
                     </Text>
                   </Descriptions.Item>
                 </Descriptions>

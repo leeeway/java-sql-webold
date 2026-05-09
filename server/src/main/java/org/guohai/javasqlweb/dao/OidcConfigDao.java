@@ -20,9 +20,9 @@ public interface OidcConfigDao {
      * 新增 OIDC 配置
      */
     @Insert("INSERT INTO oidc_config_tb " +
-            "(client_id, client_secret, issuer, callback_url, enabled, created_time, updated_time) " +
+            "(client_id, client_secret, openid_configuration_url, ssf_configuration_url, enabled, created_time, updated_time) " +
             "VALUES " +
-            "(#{clientId}, #{clientSecret}, #{issuer}, #{callbackUrl}, #{enabled}, NOW(), NOW())")
+            "(#{clientId}, #{clientSecret}, #{openidConfigurationUrl}, #{ssfConfigurationUrl}, #{enabled}, NOW(), NOW())")
     @Options(useGeneratedKeys = true, keyProperty = "code", keyColumn = "code")
     Boolean insertOidcConfig(OidcConfigBean config);
 
@@ -32,8 +32,8 @@ public interface OidcConfigDao {
     @Update("UPDATE oidc_config_tb SET " +
             "client_id = #{clientId}, " +
             "client_secret = #{clientSecret}, " +
-            "issuer = #{issuer}, " +
-            "callback_url = #{callbackUrl}, " +
+            "openid_configuration_url = #{openidConfigurationUrl}, " +
+            "ssf_configuration_url = #{ssfConfigurationUrl}, " +
             "enabled = #{enabled}, " +
             "updated_time = NOW() " +
             "WHERE code = #{code}")

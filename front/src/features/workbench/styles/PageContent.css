@@ -131,6 +131,12 @@
     line-height: 1.5;
 }
 
+.workbench-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 10px;
+}
+
 .workbench-history-panel {
     display: flex;
     flex-direction: column;
@@ -194,6 +200,16 @@
     display: flex;
     align-items: center;
     gap: 12px;
+}
+
+@media (max-width: 1024px) {
+    .workbench-query-toolbar {
+        flex-wrap: wrap;
+    }
+
+    .workbench-query-toolbar-actions {
+        margin-left: auto;
+    }
 }
 
 .workbench-render-label {

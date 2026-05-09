@@ -865,7 +865,7 @@ function Navigation() {
                               <a
                                 className="hover_show_full workbench-tree-link workbench-table-name"
                                 href="/"
-                                title=""
+                                title={`${table.tableName} (${table.tableRows})`}
                                 onClick={(event) => handleLink(event, () => sendTableName(table.tableName))}
                                 onDoubleClick={(event) => {
                                   event.preventDefault();
